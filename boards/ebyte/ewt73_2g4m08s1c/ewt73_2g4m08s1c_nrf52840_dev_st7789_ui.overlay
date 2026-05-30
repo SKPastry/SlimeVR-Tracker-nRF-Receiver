@@ -45,7 +45,7 @@
 		ui-up = &button2;
 		ui-down = &button1;
 		ui-enter = &button0;
-		pwm-led1 = &lcd_backlight;
+		lcd-backlight = &lcd_backlight;
 	};
 
 	mipi_dbi_st7789v {

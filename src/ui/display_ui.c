@@ -24,7 +24,7 @@ LOG_MODULE_REGISTER(slimenrf_ui, LOG_LEVEL_INF);
 #endif
 
 #define UI_DISPLAY_NODE DT_CHOSEN(zephyr_display)
-#define UI_BACKLIGHT_NODE DT_ALIAS(pwm_led1)
+#define UI_BACKLIGHT_NODE DT_ALIAS(lcd_backlight)
 
 #define UI_THREAD_STACK_SIZE 4096
 #define UI_COMMAND_STACK_SIZE 2048
