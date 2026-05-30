@@ -1,0 +1,5 @@
+// Copyright (c) 2026
+// SPDX-License-Identifier: Apache-2.0
+
+/dts-v1/;
+#include "ewt73_2g4m08s1c_nrf52840_common.dtsi"
