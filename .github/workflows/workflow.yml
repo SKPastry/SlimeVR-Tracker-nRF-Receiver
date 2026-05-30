@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - dev
+      - devc
       - main
   create:
   workflow_dispatch:
