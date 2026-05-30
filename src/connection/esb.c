@@ -125,9 +125,10 @@ static uint8_t packet_count[MAX_TRACKERS] = {0};             // Packet count rec
 static volatile uint8_t tracker_remote_command[MAX_TRACKERS]; // Command flag for next PONG
 static volatile uint32_t tracker_channel_value;               // Channel value for SET_CHANNEL command
 static volatile int16_t pending_sens_data[MAX_TRACKERS][3];   // SENS_SET sensitivity data
+static volatile int8_t tracker_last_rssi[MAX_TRACKERS];        // Last observed RSSI for UI snapshots
 static uint8_t receiver_rf_channel = 0xFF; // Current RF channel of the receiver, 0xFF indicates using default value
 
-#define PING_TIMEOUT_MS 5000 // PING timeout threshold: 5 seconds
+#define PING_TIMEOUT_MS ESB_TRACKER_ACTIVE_TIMEOUT_MS // PING timeout threshold: 5 seconds
 #define REMOTE_COMMAND_ACTIVE_SCAN_MS 1000 // Time window to detect trackers actively sending data
 
 /**
@@ -525,6 +526,13 @@ static inline void nvs_write_async(uint16_t id, const void *data, size_t len)
 	}
 }
 
+static inline void esb_note_tracker_rssi(uint8_t tracker_id, uint8_t rssi)
+{
+	if (tracker_id < MAX_TRACKERS) {
+		tracker_last_rssi[tracker_id] = (int8_t)rssi;
+	}
+}
+
 static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 {
 	if (tracker_id >= MAX_TRACKERS) {
@@ -791,6 +799,122 @@ static void esb_stats_thread(void)
 			}
 		}
 	}
+}
+
+static uint32_t elapsed_ms_u32(uint64_t now, uint64_t then)
+{
+	if (then == 0 || now < then) {
+		return UINT32_MAX;
+	}
+
+	uint64_t elapsed = now - then;
+
+	return elapsed > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed;
+}
+
+static uint32_t stats_remaining_from_end(bool enabled, int64_t end_time, int64_t now)
+{
+	if (!enabled || end_time == 0 || end_time <= now) {
+		return 0;
+	}
+
+	return (uint32_t)((end_time - now) / 1000);
+}
+
+size_t esb_get_tracker_snapshots(struct esb_tracker_snapshot *out, size_t max)
+{
+	if (out == NULL || max == 0) {
+		return 0;
+	}
+
+	uint64_t addresses[MAX_TRACKERS];
+	uint64_t last_seen[MAX_TRACKERS];
+	uint32_t tps[MAX_TRACKERS];
+	int8_t rssi[MAX_TRACKERS];
+	uint8_t pending_command[MAX_TRACKERS];
+	uint8_t count;
+	uint64_t now = (uint64_t)k_uptime_get();
+
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	unsigned int key = irq_lock();
+
+	count = MIN(stored_trackers, MAX_TRACKERS);
+	for (uint8_t i = 0; i < count; i++) {
+		addresses[i] = stored_tracker_addr[i];
+		last_seen[i] = MAX(last_ping_time[i], tracker_stats[i].last_packet_time);
+		tps[i] = tracker_stats[i].current_tps;
+		rssi[i] = tracker_last_rssi[i];
+		pending_command[i] = tracker_remote_command[i];
+	}
+
+	irq_unlock(key);
+	k_mutex_unlock(&tracker_store_lock);
+
+	size_t written = MIN((size_t)count, max);
+	for (size_t i = 0; i < written; i++) {
+		uint32_t age_ms = elapsed_ms_u32(now, last_seen[i]);
+
+		out[i].id = (uint8_t)i;
+		out[i].address = addresses[i];
+		out[i].paired = addresses[i] != 0;
+		out[i].active = out[i].paired && age_ms <= ESB_TRACKER_ACTIVE_TIMEOUT_MS;
+		out[i].tps = tps[i];
+		out[i].rssi = rssi[i];
+		out[i].last_seen_ms = age_ms;
+		out[i].pending_command = pending_command[i];
+	}
+
+	return written;
+}
+
+void esb_get_receiver_snapshot(struct esb_receiver_snapshot *out)
+{
+	if (out == NULL) {
+		return;
+	}
+
+	uint64_t last_seen[MAX_TRACKERS];
+	uint32_t tps[MAX_TRACKERS];
+	uint8_t paired_count;
+	uint8_t rf_channel;
+	bool pairing;
+	bool stats_enabled;
+	int64_t stats_end_time;
+	uint64_t now = (uint64_t)k_uptime_get();
+
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	unsigned int key = irq_lock();
+
+	paired_count = MIN(stored_trackers, MAX_TRACKERS);
+	rf_channel = receiver_rf_channel;
+	pairing = esb_pairing;
+	stats_enabled = stats_detailed_enabled;
+	stats_end_time = stats_detailed_end_time;
+	for (uint8_t i = 0; i < paired_count; i++) {
+		last_seen[i] = MAX(last_ping_time[i], tracker_stats[i].last_packet_time);
+		tps[i] = tracker_stats[i].current_tps;
+	}
+
+	irq_unlock(key);
+	k_mutex_unlock(&tracker_store_lock);
+
+	uint8_t active_count = 0;
+	uint32_t total_tps = 0;
+
+	for (uint8_t i = 0; i < paired_count; i++) {
+		if (elapsed_ms_u32(now, last_seen[i]) <= ESB_TRACKER_ACTIVE_TIMEOUT_MS) {
+			active_count++;
+		}
+		total_tps += tps[i];
+	}
+
+	out->paired_count = paired_count;
+	out->active_count = active_count;
+	out->rf_channel = rf_channel;
+	out->pairing = pairing;
+	out->stats_detailed = stats_enabled;
+	out->stats_remaining_s = stats_remaining_from_end(stats_enabled, stats_end_time, (int64_t)now);
+	out->total_tps = total_tps;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1396,6 +1520,7 @@ void event_handler(struct esb_evt const *event)
 					uint8_t counter = rx_payload.data[2];
 
 					uint8_t ping_ack_flag = rx_payload.data[7];
+					esb_note_tracker_rssi(tracker_id, rx_payload.rssi);
 
 					if (rx_payload.pipe != 1 + (tracker_id % 7)) {
 						static uint8_t pipe_mismatch_count[MAX_TRACKERS] = {0};
@@ -1655,6 +1780,7 @@ void event_handler(struct esb_evt const *event)
 				if (tracker_id >= stored_trackers) { // not a stored tracker
 					continue;
 				}
+				esb_note_tracker_rssi(tracker_id, rx_payload.rssi);
 
 				if (rx_payload.data[0] > 223) { // reserved for receiver only
 					break;
@@ -1713,6 +1839,7 @@ void event_handler(struct esb_evt const *event)
 					uint8_t tracker_id = rx_payload.data[1];
 					if (tracker_id < stored_trackers &&
 					    data_collect_is_target(tracker_id)) {
+						esb_note_tracker_rssi(tracker_id, rx_payload.rssi);
 						/* Dedup raw IMU by tracker_id + sequence */
 						if (pkt_type == ESB_RAW_IMU_TYPE ||
 						    pkt_type == ESB_RAW_IMU_QUAT_TYPE) {
@@ -1762,6 +1889,7 @@ handle_composite_packet:
 				if (tracker_id >= stored_trackers) {
 					continue;
 				}
+				esb_note_tracker_rssi(tracker_id, rx_payload.rssi);
 
 				LOG_DBG("Received composite packet from tracker %d with %d sub-packets", tracker_id, sub_count);
 
@@ -2258,6 +2386,7 @@ void esb_clear(void)
 	for (int i = 0; i < MAX_TRACKERS; i++) {
 		last_packet_sequence[i] = 0;
 		packet_count[i] = 0;
+		tracker_last_rssi[i] = 0;
 		memset(&tracker_stats[i], 0, sizeof(struct packet_stats));
 	}
 	LOG_INF("Packet sequence state and statistics reset for all trackers");
@@ -2278,6 +2407,7 @@ void esb_reset_tracker_sequence(uint8_t tracker_id)
 		last_pong_queued_counter[tracker_id] = 0;
 		// Reset statistics
 		memset(&tracker_stats[tracker_id], 0, sizeof(struct packet_stats));
+		tracker_last_rssi[tracker_id] = 0;
 		// Reset RSSI smoothing state
 		hid_reset_rssi_smooth(tracker_id);
 		LOG_INF("Packet sequence state and statistics reset for tracker %d", tracker_id);

@@ -75,6 +75,11 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(NONE)
 
 FILE(GLOB_RECURSE app_sources src/*.c)
+
+if(NOT CONFIG_SLIMENRF_DISPLAY_UI)
+  list(FILTER app_sources EXCLUDE REGEX ".*/src/ui/.*\\.c$")
+endif()
+
 # Data collection: choose HID or CDC implementation, or exclude both
 if(CONFIG_DATA_COLLECT)
   if(CONFIG_DATA_COLLECT_HID)

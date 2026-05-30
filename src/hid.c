@@ -346,6 +346,11 @@ uint32_t hid_get_current_tps(void)
 	return hid_stats_snapshot(NULL);
 }
 
+bool hid_usb_is_configured(void)
+{
+	return usb_enabled && configured;
+}
+
 // RSSI指数加权移动平均滤波函数
 // 使用EMA算法: EMA(n) = alpha * X(n) + (1 - alpha) * EMA(n-1)
 // 为避免浮点运算，使用定点数: alpha = RSSI_EMA_ALPHA / 256

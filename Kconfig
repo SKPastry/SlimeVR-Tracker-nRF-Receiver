@@ -96,4 +96,13 @@ config DATA_COLLECT_HID
         When enabled, raw data is sent via a dedicated HID endpoint.
         When disabled, raw data is sent via a second CDC ACM serial port.
 
+config SLIMENRF_DISPLAY_UI
+    bool "Enable EWT73 ST7789 status display UI"
+    depends on BOARD_EWT73_2G4M08S1C_NRF52840_DEV
+    default n
+    help
+        Enable the optional ST7789/LVGL status UI for the EWT73 development
+        board. This is intentionally board-gated so default receiver builds
+        do not pull in display, LVGL, or input dependencies.
+
 source "Kconfig.zephyr"

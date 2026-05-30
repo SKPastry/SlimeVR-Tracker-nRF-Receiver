@@ -24,6 +24,8 @@
 #define SLIMENRF_ESB
 
 #include <esb.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 // Ping/Pong constants (shared protocol)
@@ -33,6 +35,7 @@
 #define ESB_PONG_LEN 13
 #define ESB_MAX_PAYLOAD_LEN CONFIG_ESB_MAX_PAYLOAD_LENGTH
 #define ESB_COMPOSITE_TYPE 0xFE // Composite packet containing multiple sub-packets
+#define ESB_TRACKER_ACTIVE_TIMEOUT_MS 5000
 
 // Remote command flags for PONG data[7]
 #define ESB_PONG_FLAG_NORMAL 0x00
@@ -91,6 +94,27 @@
 #define ESB_OTA_VERIFY_TYPE     0x24  // Request CRC verification (receiver → tracker)
 #define ESB_OTA_ACTIVATE_TYPE   0x25  // Activate new firmware (receiver → tracker)
 
+struct esb_tracker_snapshot {
+	uint8_t id;
+	uint64_t address;
+	bool paired;
+	bool active;
+	uint32_t tps;
+	int8_t rssi;
+	uint32_t last_seen_ms;
+	uint8_t pending_command;
+};
+
+struct esb_receiver_snapshot {
+	uint8_t paired_count;
+	uint8_t active_count;
+	uint8_t rf_channel;
+	bool pairing;
+	bool stats_detailed;
+	uint32_t stats_remaining_s;
+	uint32_t total_tps;
+};
+
 void event_handler(struct esb_evt const *event);
 int clocks_start(void);
 int esb_initialize(bool);
@@ -113,6 +137,9 @@ void esb_print_all_stats(void);
 void esb_reset_all_stats(void);
 void esb_write_sync(uint16_t led_clock);
 void esb_receive(void);
+
+void esb_get_receiver_snapshot(struct esb_receiver_snapshot *out);
+size_t esb_get_tracker_snapshots(struct esb_tracker_snapshot *out, size_t max);
 
 // Statistics display control
 bool esb_toggle_stats_detailed(void);           // Toggle detailed stats on/off

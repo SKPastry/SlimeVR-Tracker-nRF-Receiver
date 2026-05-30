@@ -29,12 +29,16 @@ LOG_MODULE_REGISTER(system, LOG_LEVEL_INF);
 #if DT_NODE_HAS_PROP(DT_ALIAS(sw0), gpios)
 #define BUTTON_EXISTS true
 static const struct gpio_dt_spec button0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+#define BUTTON_RUNTIME_ACTIONS !IS_ENABLED(CONFIG_SLIMENRF_DISPLAY_UI)
+#if BUTTON_RUNTIME_ACTIONS
 static int64_t press_time = 0;
 static int64_t last_press_duration = 0;
 static void button_thread(void);
 K_THREAD_DEFINE(button_thread_id, 1024, button_thread, NULL, NULL, NULL, 6, 0, 0);
+#endif
 #else
 #define BUTTON_EXISTS false
+#define BUTTON_RUNTIME_ACTIONS false
 #pragma message "Button GPIO does not exist"
 #endif
 
@@ -87,7 +91,7 @@ uint8_t reboot_counter_read(void) {
 	return reboot_counter;
 }
 
-#if BUTTON_EXISTS
+#if BUTTON_EXISTS && BUTTON_RUNTIME_ACTIONS
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
 	bool pressed = button_read();
@@ -137,7 +141,7 @@ void sys_request_system_reboot(void)
 	sys_reboot(SYS_REBOOT_COLD);
 }
 
-#if BUTTON_EXISTS
+#if BUTTON_EXISTS && BUTTON_RUNTIME_ACTIONS
 static void button_thread(void)
 {
 	int num_presses = 0;
