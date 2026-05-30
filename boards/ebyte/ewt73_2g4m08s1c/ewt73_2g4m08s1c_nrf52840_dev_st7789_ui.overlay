@@ -45,6 +45,7 @@
 		ui-up = &button2;
 		ui-down = &button1;
 		ui-enter = &button0;
+		ui-back = &button3;
 		lcd-backlight = &lcd_backlight;
 	};
 
@@ -90,6 +91,11 @@
 
 	buttons: buttons {
 		debounce-interval-ms = <30>;
+		button3: button_3 {
+			gpios = <&gpio0 18 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "KEY SW2";
+			zephyr,code = <INPUT_KEY_ESC>;
+		};
 	};
 
 	pwmleds: pwmleds {
@@ -101,8 +107,8 @@
 	lvgl_keypad: slimenrf-lvgl-keypad {
 		compatible = "zephyr,lvgl-keypad-input";
 		input = <&buttons>;
-		input-codes = <INPUT_KEY_UP INPUT_KEY_DOWN INPUT_KEY_ENTER>;
-		lvgl-codes = <LV_KEY_UP LV_KEY_DOWN LV_KEY_ENTER>;
+		input-codes = <INPUT_KEY_UP INPUT_KEY_DOWN INPUT_KEY_ENTER INPUT_KEY_ESC>;
+		lvgl-codes = <LV_KEY_UP LV_KEY_DOWN LV_KEY_ENTER LV_KEY_ESC>;
 	};
 };
 

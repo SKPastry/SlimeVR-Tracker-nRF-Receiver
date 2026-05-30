@@ -48,6 +48,7 @@ enum ui_key {
 	UI_KEY_UP,
 	UI_KEY_DOWN,
 	UI_KEY_ENTER,
+	UI_KEY_BACK,
 };
 
 enum ui_view {
@@ -148,6 +149,10 @@ static bool ui_key_from_input(uint16_t code, enum ui_key *key)
 		return true;
 	case INPUT_KEY_ENTER:
 		*key = UI_KEY_ENTER;
+		return true;
+	case INPUT_KEY_ESC:
+	case INPUT_KEY_BACK:
+		*key = UI_KEY_BACK;
 		return true;
 	default:
 		return false;
@@ -397,7 +402,7 @@ static void ui_render_menu(void)
 							  lv_color_hex(0xf5f7fa));
 	}
 
-	ui_set_text(footer_label, "SW1 Select    Hold SW1 Back", lv_color_hex(0x9aa6b2));
+	ui_set_text(footer_label, "SW1 Select    SW2 Back", lv_color_hex(0x9aa6b2));
 }
 
 static void ui_render_confirm(void)
@@ -413,9 +418,9 @@ static void ui_render_confirm(void)
 		ui_set_text(row_labels[row], "", lv_color_hex(0xb6c2cc));
 	}
 
-	ui_set_text(row_labels[1], "UP/DOWN cancels", lv_color_hex(0xb6c2cc));
+	ui_set_text(row_labels[1], "SW2/UP/DOWN cancels", lv_color_hex(0xb6c2cc));
 	ui_set_text(row_labels[2], "No shutdown/reboot/DFU", lv_color_hex(0x9adf6f));
-	ui_set_text(footer_label, "SW4/SW3 Cancel", lv_color_hex(0x9aa6b2));
+	ui_set_text(footer_label, "Hold SW1 Run    SW2 Cancel", lv_color_hex(0x9aa6b2));
 }
 
 static void ui_render(void)
@@ -440,6 +445,21 @@ static void ui_cancel_confirm(void)
 	ui.view = UI_VIEW_MENU;
 	ui.confirm_command = UI_COMMAND_NONE;
 	ui_toast("Canceled");
+}
+
+static void ui_handle_back(void)
+{
+	ui.enter_pressed = false;
+
+	if (ui.view == UI_VIEW_CONFIRM) {
+		ui_cancel_confirm();
+		return;
+	}
+
+	if (ui.view == UI_VIEW_MENU) {
+		ui.view = UI_VIEW_MAIN;
+		ui_mark_fast();
+	}
 }
 
 static void ui_handle_up_down(enum ui_key key)
@@ -533,8 +553,20 @@ static void ui_handle_input(const struct ui_input_msg *msg)
 		return;
 	}
 
-	if (msg->pressed) {
+	if (!msg->pressed) {
+		return;
+	}
+
+	switch (msg->key) {
+	case UI_KEY_UP:
+	case UI_KEY_DOWN:
 		ui_handle_up_down(msg->key);
+		break;
+	case UI_KEY_BACK:
+		ui_handle_back();
+		break;
+	default:
+		break;
 	}
 }
 
