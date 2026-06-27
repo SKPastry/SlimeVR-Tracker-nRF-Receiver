@@ -1,0 +1,172 @@
+// Copyright (c) 2026
+// SPDX-License-Identifier: Apache-2.0
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/lvgl/lvgl.h>
+#include <zephyr/dt-bindings/mipi_dbi/mipi_dbi.h>
+
+&pinctrl {
+	spi3_default: spi3_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 0, 17)>,
+				<NRF_PSEL(SPIM_MOSI, 0, 20)>;
+		};
+	};
+
+	spi3_sleep: spi3_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 0, 17)>,
+				<NRF_PSEL(SPIM_MOSI, 0, 20)>;
+			low-power-enable;
+		};
+	};
+
+	pwm1_default: pwm1_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 11)>;
+		};
+	};
+
+	pwm1_sleep: pwm1_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 11)>;
+			low-power-enable;
+		};
+	};
+};
+
+/ {
+	chosen {
+		zephyr,display = &st7789v_tft;
+	};
+
+	aliases {
+		sw0 = &button_a;
+		ui-up = &button_up;
+		ui-down = &button_down;
+		ui-left = &button_left;
+		ui-right = &button_right;
+		ui-a = &button_a;
+		ui-b = &button_b;
+		ui-enter = &button_a;
+		ui-back = &button_b;
+		lcd-backlight = &lcd_backlight;
+		mcuboot-button0 = &button_a;
+	};
+
+	mipi_dbi_st7789v {
+		compatible = "zephyr,mipi-dbi-spi";
+		spi-dev = <&spi3>;
+		dc-gpios = <&gpio0 24 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;
+		write-only;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+
+		st7789v_tft: st7789v@0 {
+			compatible = "sitronix,st7789v";
+			reg = <0>;
+			mipi-max-frequency = <16000000>;
+
+			width = <240>;
+			height = <135>;
+			x-offset = <40>;
+			y-offset = <53>;
+
+			vcom = <0x19>;
+			gctrl = <0x35>;
+			vrhs = <0x12>;
+			vdvs = <0x20>;
+			mdac = <0x77>;
+			gamma = <0x00>;
+			colmod = <0x05>;
+			lcm = <0x2c>;
+			porch-param = [0c 0c 00 33 33];
+			cmd2en-param = [5a 69 02 00];
+			pwctrl1-param = [a4 a1];
+			pvgam-param = [d0 04 0d 11 13 2b 3f 54 4c 18 0d 0b 1f 23];
+			nvgam-param = [d0 04 0c 11 13 2c 3f 44 51 2f 1f 1f 20 23];
+			ram-param = [00 f0];
+			rgb-param = [40 02 14];
+			mipi-mode = "MIPI_DBI_MODE_SPI_4WIRE";
+			status = "okay";
+		};
+	};
+
+	lvgl_keypad: slimenrf-lvgl-keypad {
+		compatible = "zephyr,lvgl-keypad-input";
+		input = <&buttons>;
+		input-codes = <INPUT_KEY_UP INPUT_KEY_DOWN INPUT_KEY_LEFT INPUT_KEY_RIGHT INPUT_KEY_ENTER INPUT_KEY_ESC>;
+		lvgl-codes = <LV_KEY_UP LV_KEY_DOWN LV_KEY_LEFT LV_KEY_RIGHT LV_KEY_ENTER LV_KEY_ESC>;
+	};
+};
+
+&buttons {
+	button_up: button_up {
+		gpios = <&gpio0 31 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		label = "UI Up";
+		zephyr,code = <INPUT_KEY_UP>;
+	};
+
+	button_down: button_down {
+		gpios = <&gpio0 29 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		label = "UI Down";
+		zephyr,code = <INPUT_KEY_DOWN>;
+	};
+
+	button_left: button_left {
+		gpios = <&gpio0 2 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		label = "UI Left";
+		zephyr,code = <INPUT_KEY_LEFT>;
+	};
+
+	button_right: button_right {
+		gpios = <&gpio1 15 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		label = "UI Right";
+		zephyr,code = <INPUT_KEY_RIGHT>;
+	};
+
+	button_a: button_a {
+		gpios = <&gpio1 13 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		label = "UI A";
+		zephyr,code = <INPUT_KEY_ENTER>;
+	};
+
+	button_b: button_b {
+		gpios = <&gpio1 11 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		label = "UI B";
+		zephyr,code = <INPUT_KEY_ESC>;
+	};
+};
+
+&gpio0 {
+	external_vcc_enable: external_vcc_enable {
+		gpio-hog;
+		gpios = <13 GPIO_ACTIVE_HIGH>;
+		output-low;
+	};
+};
+
+&pwmleds {
+	lcd_backlight: lcd_backlight {
+		pwms = <&pwm1 0 PWM_MSEC(1) PWM_POLARITY_NORMAL>;
+	};
+};
+
+&pwm1 {
+	status = "okay";
+	pinctrl-0 = <&pwm1_default>;
+	pinctrl-1 = <&pwm1_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+&spi3 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+	cs-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&spi3_default>;
+	pinctrl-1 = <&spi3_sleep>;
+	pinctrl-names = "default", "sleep";
+};

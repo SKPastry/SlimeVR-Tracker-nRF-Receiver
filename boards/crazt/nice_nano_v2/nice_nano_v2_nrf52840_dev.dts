@@ -1,0 +1,5 @@
+// Copyright (c) 2026
+// SPDX-License-Identifier: Apache-2.0
+
+/dts-v1/;
+#include "nice_nano_v2_nrf52840_common.dtsi"
