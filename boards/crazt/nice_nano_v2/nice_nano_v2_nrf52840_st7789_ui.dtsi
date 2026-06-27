@@ -58,8 +58,9 @@
 	mipi_dbi_st7789v {
 		compatible = "zephyr,mipi-dbi-spi";
 		spi-dev = <&spi3>;
+		/* Match the common ST7789 header order on the left side: SCL/SDA/RES/DC/CS/BLK. */
 		dc-gpios = <&gpio0 24 GPIO_ACTIVE_HIGH>;
-		reset-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
 		write-only;
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -145,7 +146,8 @@
 	external_vcc_enable: external_vcc_enable {
 		gpio-hog;
 		gpios = <13 GPIO_ACTIVE_HIGH>;
-		output-low;
+		/* nice!nano v2 disables the external 3V3/VCC rail when P0.13 is low. */
+		output-high;
 	};
 };
 
@@ -165,7 +167,7 @@
 &spi3 {
 	compatible = "nordic,nrf-spim";
 	status = "okay";
-	cs-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
+	cs-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;
 	pinctrl-0 = <&spi3_default>;
 	pinctrl-1 = <&spi3_sleep>;
 	pinctrl-names = "default", "sleep";
