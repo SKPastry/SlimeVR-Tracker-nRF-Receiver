@@ -49,6 +49,14 @@ LOG_MODULE_REGISTER(slimenrf_ui, LOG_LEVEL_INF);
 #define UI_DISPLAY_BUS_PROBE 0
 #endif
 
+#if defined(CONFIG_BOARD_TARGET)
+#define UI_FIRMWARE_TARGET CONFIG_BOARD_TARGET
+#elif defined(CONFIG_BOARD)
+#define UI_FIRMWARE_TARGET CONFIG_BOARD
+#else
+#define UI_FIRMWARE_TARGET "unknown"
+#endif
+
 #if LV_FONT_MONTSERRAT_12
 #define UI_FONT_SMALL (&lv_font_montserrat_12)
 #else
@@ -312,7 +320,7 @@ static void ui_render_main(void)
 	ui.tracker_offset = MIN(ui.tracker_offset, ui_max_tracker_offset(tracker_count));
 	ui_format_channel(channel, sizeof(channel), receiver.rf_channel);
 
-	(void)snprintk(line, sizeof(line), "EWT73 RX  USB:%s  RF:%s",
+	(void)snprintk(line, sizeof(line), "RX  USB:%s  RF:%s",
 		       hid_usb_is_configured() ? "ON" : "OFF", channel);
 	ui_set_text(title_label, line, lv_color_hex(0xf5f7fa));
 
@@ -720,7 +728,7 @@ static void ui_thread(void)
 	ui_init_backlight();
 	ui_init_display();
 	ui_probe_display_bus();
-	LOG_INF("EWT73 ST7789 status UI started");
+	LOG_INF("%s ST7789 status UI started", UI_FIRMWARE_TARGET);
 
 	int64_t last_render = 0;
 
