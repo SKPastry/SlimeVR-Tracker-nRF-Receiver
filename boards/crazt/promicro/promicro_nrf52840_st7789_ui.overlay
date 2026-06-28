@@ -57,7 +57,7 @@
 		compatible = "zephyr,mipi-dbi-spi";
 		spi-dev = <&spi3>;
 		dc-gpios = <&gpio0 24 GPIO_ACTIVE_HIGH>;
-		reset-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&gpio0 22 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		write-only;
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -157,7 +157,7 @@
 &spi3 {
 	compatible = "nordic,nrf-spim";
 	status = "okay";
-	cs-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
+	cs-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;
 	pinctrl-0 = <&spi3_default>;
 	pinctrl-1 = <&spi3_sleep>;
 	pinctrl-names = "default", "sleep";
