@@ -42,7 +42,6 @@
 	};
 
 	aliases {
-		sw0 = &button_a;
 		ui-up = &button_up;
 		ui-down = &button_down;
 		ui-left = &button_left;
@@ -52,16 +51,13 @@
 		ui-enter = &button_a;
 		ui-back = &button_b;
 		lcd-backlight = &lcd_backlight;
-		mcuboot-button0 = &button_a;
 	};
 
 	mipi_dbi_st7789v {
 		compatible = "zephyr,mipi-dbi-spi";
 		spi-dev = <&spi3>;
-		xfr-min-bits = "MIPI_DBI_SPI_XFR_8BIT";
-		/* Match the common ST7789 header order on the left side: SCL/SDA/RES/DC/CS/BLK. */
 		dc-gpios = <&gpio0 24 GPIO_ACTIVE_HIGH>;
-		reset-gpios = <&gpio0 22 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		reset-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;
 		write-only;
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -70,8 +66,7 @@
 		st7789v_tft: st7789v@0 {
 			compatible = "sitronix,st7789v";
 			reg = <0>;
-			mipi-max-frequency = <1000000>;
-			ready-time-ms = <255>;
+			mipi-max-frequency = <16000000>;
 
 			width = <240>;
 			height = <135>;
@@ -131,12 +126,6 @@
 		zephyr,code = <INPUT_KEY_RIGHT>;
 	};
 
-	button_a: button_a {
-		gpios = <&gpio1 13 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-		label = "UI A";
-		zephyr,code = <INPUT_KEY_ENTER>;
-	};
-
 	button_b: button_b {
 		gpios = <&gpio1 11 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 		label = "UI B";
@@ -148,7 +137,6 @@
 	external_vcc_enable: external_vcc_enable {
 		gpio-hog;
 		gpios = <13 GPIO_ACTIVE_HIGH>;
-		/* nice!nano v2 disables the external 3V3/VCC rail when P0.13 is low. */
 		output-high;
 	};
 };
@@ -169,7 +157,7 @@
 &spi3 {
 	compatible = "nordic,nrf-spim";
 	status = "okay";
-	cs-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;
+	cs-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
 	pinctrl-0 = <&spi3_default>;
 	pinctrl-1 = <&spi3_sleep>;
 	pinctrl-names = "default", "sleep";
