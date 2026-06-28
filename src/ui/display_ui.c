@@ -37,6 +37,17 @@ LOG_MODULE_REGISTER(slimenrf_ui, LOG_LEVEL_INF);
 #define UI_FAST_WINDOW_MS 2000
 #define UI_LOOP_SLEEP_MS 20
 #define UI_LONG_PRESS_MS 800
+#define UI_DISPLAY_BUS_PROBE_ROWS 8
+#define UI_DISPLAY_BUS_PROBE_ROUNDS 64
+#define UI_DISPLAY_WIDTH DT_PROP(UI_DISPLAY_NODE, width)
+#define UI_DISPLAY_HEIGHT DT_PROP(UI_DISPLAY_NODE, height)
+
+#if defined(CONFIG_BOARD_NICE_NANO_V2_NRF52840_DEV_ST7789_UI) || \
+	defined(CONFIG_BOARD_NICE_NANO_V2_NRF52840_UF2_ST7789_UI)
+#define UI_DISPLAY_BUS_PROBE 1
+#else
+#define UI_DISPLAY_BUS_PROBE 0
+#endif
 
 #if LV_FONT_MONTSERRAT_12
 #define UI_FONT_SMALL (&lv_font_montserrat_12)
@@ -582,6 +593,7 @@ static void ui_process_input(void)
 static void ui_init_display(void)
 {
 	lv_obj_t *screen = lv_screen_active();
+	int err;
 
 	lv_obj_set_style_bg_color(screen, lv_color_hex(0x101315), LV_PART_MAIN);
 	lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
@@ -610,7 +622,52 @@ static void ui_init_display(void)
 
 	ui_render();
 	lv_timer_handler();
-	display_blanking_off(display_dev);
+	lv_refr_now(NULL);
+
+	err = display_blanking_off(display_dev);
+	if (err) {
+		LOG_WRN("LCD display blanking off failed: %d", err);
+	}
+}
+
+static void ui_probe_display_bus(void)
+{
+#if UI_DISPLAY_BUS_PROBE
+	static uint16_t probe_buf[UI_DISPLAY_WIDTH * UI_DISPLAY_BUS_PROBE_ROWS];
+	static const uint16_t colors[] = { 0xf800, 0x07e0, 0x001f, 0xffff };
+	struct display_buffer_descriptor desc = {
+		.buf_size = sizeof(probe_buf),
+		.width = UI_DISPLAY_WIDTH,
+		.height = UI_DISPLAY_BUS_PROBE_ROWS,
+		.pitch = UI_DISPLAY_WIDTH,
+	};
+	uint16_t stripes = UI_DISPLAY_HEIGHT / UI_DISPLAY_BUS_PROBE_ROWS;
+
+	LOG_INF("LCD SPI probe writes started");
+
+	for (uint8_t round = 0; round < UI_DISPLAY_BUS_PROBE_ROUNDS; round++) {
+		uint16_t color = colors[round % ARRAY_SIZE(colors)];
+
+		for (size_t i = 0; i < ARRAY_SIZE(probe_buf); i++) {
+			probe_buf[i] = color;
+		}
+
+		int err = display_write(display_dev, 0,
+					(round % stripes) * UI_DISPLAY_BUS_PROBE_ROWS,
+					&desc, probe_buf);
+
+		if (err) {
+			LOG_WRN("LCD SPI probe write failed: %d", err);
+			break;
+		}
+
+		k_sleep(K_MSEC(10));
+	}
+
+	lv_obj_invalidate(lv_screen_active());
+	lv_refr_now(NULL);
+	LOG_INF("LCD SPI probe writes finished");
+#endif
 }
 
 static void ui_init_backlight(void)
@@ -638,6 +695,7 @@ static void ui_thread(void)
 
 	ui_init_backlight();
 	ui_init_display();
+	ui_probe_display_bus();
 	LOG_INF("EWT73 ST7789 status UI started");
 
 	int64_t last_render = 0;

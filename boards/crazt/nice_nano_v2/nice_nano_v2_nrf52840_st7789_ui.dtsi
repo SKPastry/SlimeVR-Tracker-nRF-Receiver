@@ -58,6 +58,7 @@
 	mipi_dbi_st7789v {
 		compatible = "zephyr,mipi-dbi-spi";
 		spi-dev = <&spi3>;
+		xfr-min-bits = "MIPI_DBI_SPI_XFR_8BIT";
 		/* Match the common ST7789 header order on the left side: SCL/SDA/RES/DC/CS/BLK. */
 		dc-gpios = <&gpio0 24 GPIO_ACTIVE_HIGH>;
 		reset-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
@@ -69,7 +70,8 @@
 		st7789v_tft: st7789v@0 {
 			compatible = "sitronix,st7789v";
 			reg = <0>;
-			mipi-max-frequency = <16000000>;
+			mipi-max-frequency = <4000000>;
+			ready-time-ms = <250>;
 
 			width = <240>;
 			height = <135>;
