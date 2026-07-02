@@ -1,0 +1,18 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+identifier: sk_cheesecake_nrf_p00/nrf52840/dev
+name: SK Cheesecake nRF P00 Dev
+vendor: crazt
+type: mcu
+arch: arm
+ram: 256
+flash: 1024
+toolchain:
+  - zephyr
+  - gnuarmemb
+  - xtools
+supported:
+  - gpio
+  - pwm
+  - usb_device
