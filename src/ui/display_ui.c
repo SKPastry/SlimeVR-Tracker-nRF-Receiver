@@ -37,7 +37,7 @@ LOG_MODULE_REGISTER(slimenrf_ui, LOG_LEVEL_INF);
 #define UI_FAST_WINDOW_MS 2000
 #define UI_LOOP_SLEEP_MS 20
 #define UI_LONG_PRESS_MS 800
-#define UI_DISPLAY_BUS_PROBE_ROWS 8
+#define UI_DISPLAY_BUS_PROBE_ROWS 5
 #define UI_DISPLAY_BUS_PROBE_ROUNDS 64
 #define UI_DISPLAY_WIDTH DT_PROP(UI_DISPLAY_NODE, width)
 #define UI_DISPLAY_HEIGHT DT_PROP(UI_DISPLAY_NODE, height)
@@ -662,6 +662,30 @@ static void ui_probe_display_bus(void)
 		}
 
 		k_sleep(K_MSEC(10));
+	}
+
+	static const uint16_t hold_colors[] = { 0x0000, 0xffff, 0xf800, 0x07e0, 0x001f };
+	static const char *const hold_names[] = { "black", "white", "red", "green", "blue" };
+
+	for (size_t color_index = 0; color_index < ARRAY_SIZE(hold_colors); color_index++) {
+		for (size_t i = 0; i < ARRAY_SIZE(probe_buf); i++) {
+			probe_buf[i] = hold_colors[color_index];
+		}
+
+		for (uint16_t stripe = 0; stripe < stripes; stripe++) {
+			int err = display_write(display_dev, 0,
+						stripe * UI_DISPLAY_BUS_PROBE_ROWS,
+						&desc, probe_buf);
+
+			if (err) {
+				LOG_WRN("LCD SPI probe %s fill failed: %d",
+					hold_names[color_index], err);
+				break;
+			}
+		}
+
+		LOG_INF("LCD SPI probe %s screen hold", hold_names[color_index]);
+		k_sleep(K_MSEC(1000));
 	}
 
 	lv_obj_invalidate(lv_screen_active());

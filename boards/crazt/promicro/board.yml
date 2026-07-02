@@ -1,0 +1,12 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+board:
+  name: promicro
+  full_name: ProMicro nRF52840
+  vendor: crazt
+  socs:
+    - name: nrf52840
+      variants:
+        - name: dev
+        - name: uf2
