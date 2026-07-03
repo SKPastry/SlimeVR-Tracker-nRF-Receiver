@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/dt-bindings/lvgl/lvgl.h>
 #include <zephyr/dt-bindings/mipi_dbi/mipi_dbi.h>
 
@@ -41,6 +42,15 @@
 	};
 
 	aliases {
+		ui-up = &button_up;
+		ui-down = &button_down;
+		ui-left = &button_left;
+		ui-right = &button_right;
+		ui-a = &button_a;
+		ui-b = &button_b;
+		ui-enter = &button_a;
+		ui-back = &button_b;
+		sw0 = &button_a;
 		lcd-backlight = &lcd_backlight;
 	};
 
@@ -82,6 +92,54 @@
 			mipi-mode = "MIPI_DBI_MODE_SPI_4WIRE";
 			status = "okay";
 		};
+	};
+
+	buttons: buttons {
+		compatible = "gpio-keys";
+		debounce-interval-ms = <30>;
+
+		button_up: button_up {
+			gpios = <&gpio1 2 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "UI Up";
+			zephyr,code = <INPUT_KEY_UP>;
+		};
+
+		button_down: button_down {
+			gpios = <&gpio1 11 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "UI Down";
+			zephyr,code = <INPUT_KEY_DOWN>;
+		};
+
+		button_left: button_left {
+			gpios = <&gpio1 13 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "UI Left";
+			zephyr,code = <INPUT_KEY_LEFT>;
+		};
+
+		button_right: button_right {
+			gpios = <&gpio0 29 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "UI Right";
+			zephyr,code = <INPUT_KEY_RIGHT>;
+		};
+
+		button_a: button_a {
+			gpios = <&gpio1 10 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "UI A";
+			zephyr,code = <INPUT_KEY_ENTER>;
+		};
+
+		button_b: button_b {
+			gpios = <&gpio0 13 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "UI B";
+			zephyr,code = <INPUT_KEY_ESC>;
+		};
+	};
+
+	lvgl_keypad: slimenrf-lvgl-keypad {
+		compatible = "zephyr,lvgl-keypad-input";
+		input = <&buttons>;
+		input-codes = <INPUT_KEY_UP INPUT_KEY_DOWN INPUT_KEY_LEFT INPUT_KEY_RIGHT INPUT_KEY_ENTER INPUT_KEY_ESC>;
+		lvgl-codes = <LV_KEY_UP LV_KEY_DOWN LV_KEY_LEFT LV_KEY_RIGHT LV_KEY_ENTER LV_KEY_ESC>;
 	};
 
 	pwmleds: pwmleds {
