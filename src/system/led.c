@@ -1,7 +1,9 @@
 #include "globals.h"
 #include "util.h"
 
+#include <errno.h>
 #include <math.h>
+#include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/kernel.h>
@@ -17,10 +19,26 @@ K_THREAD_DEFINE(led_thread_id, 512, led_thread, NULL, NULL, NULL, 6, 0, 0);
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 
 #if CONFIG_LED_STRIP
-#define LED_STRIP_EXISTS true
+#define LED_STRIP_EXISTS 1
 #include <zephyr/drivers/led_strip.h>
 #define STRIP_NODE DT_ALIAS(led_strip)
 static const struct device *const strip = DEVICE_DT_GET(STRIP_NODE);
+
+static int led_strip_set_rgb(uint8_t red, uint8_t green, uint8_t blue)
+{
+	struct led_rgb pixel = {
+		.r = red,
+		.g = green,
+		.b = blue,
+	};
+	int err = led_strip_update_rgb(strip, &pixel, 1);
+
+	if (err) {
+		LOG_ERR("Failed to update LED strip: %d", err);
+	}
+
+	return err;
+}
 #endif
 
 #if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, led_gpios)
@@ -81,10 +99,21 @@ static int led_pattern_state;
 static int led_pin_init(void)
 {
 	LOG_DBG("led_pin_init");
-	#if LED_EXISTS
+#if LED_STRIP_EXISTS
+	if (!device_is_ready(strip)) {
+		LOG_ERR("LED strip device %s is not ready", strip->name);
+		return -ENODEV;
+	}
+
+	int err = led_strip_set_rgb(0, 0, 0);
+	if (err) {
+		return err;
+	}
+#endif
+#if LED_EXISTS
 	gpio_pin_configure_dt(&led, GPIO_OUTPUT);
 	gpio_pin_set_dt(&led, 0);
-	#endif
+#endif
 #if LED0_EXISTS
 	gpio_pin_configure_dt(&led0, GPIO_OUTPUT);
 	gpio_pin_set_dt(&led0, 0);
@@ -216,12 +245,12 @@ static void led_pin_set(enum sys_led_color color, int brightness_pptt, int value
 	else if (value_pptt > 10000)
 		value_pptt = 10000;
 #if LED_STRIP_EXISTS
-	static struct led_rgb pixel[1];
 	value_pptt = value_pptt * brightness_pptt / 10000;
-	pixel[0].r = 255 * (led_pwm_period[color][0] * value_pptt / 10000) / 10000;
-	pixel[0].g = 255 * (led_pwm_period[color][1] * value_pptt / 10000) / 10000;
-	pixel[0].b = 255 * (led_pwm_period[color][2] * value_pptt / 10000) / 10000;
-	led_strip_update_rgb(strip, pixel, 1);
+	led_strip_set_rgb(
+		255 * (led_pwm_period[color][0] * value_pptt / 10000) / 10000,
+		255 * (led_pwm_period[color][1] * value_pptt / 10000) / 10000,
+		255 * (led_pwm_period[color][2] * value_pptt / 10000) / 10000
+	);
 #elif PWM_LED_EXISTS
 	value_pptt = value_pptt * brightness_pptt / 10000;
 	// only supporting color if PWM is supported
@@ -261,6 +290,9 @@ void set_led(enum sys_led_pattern led_pattern, int priority)
 	led_pattern_state = 0;
 	if (current_led_pattern <= SYS_LED_PATTERN_OFF)
 	{
+#if LED_STRIP_EXISTS
+		led_pin_set(SYS_LED_COLOR_DEFAULT, 0, 0);
+#endif
 		led_suspend();
 		k_thread_suspend(led_thread_id);
 		LOG_DBG("set_led: suspended led_thread_id");
