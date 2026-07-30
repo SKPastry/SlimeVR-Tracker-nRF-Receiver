@@ -2434,6 +2434,8 @@ static const char *esb_pong_flag_name(uint8_t flag)
 		return "OTA_SUPPRESS";
 	case ESB_PONG_FLAG_OTA_UNSUPPRESS:
 		return "OTA_UNSUPPRESS";
+	case ESB_PONG_FLAG_TCAL_HEAT_START:
+		return "TCAL_HEAT_START";
 	default:
 		return "UNKNOWN";
 	}
