@@ -78,6 +78,7 @@
 #define ESB_PONG_FLAG_OTA_ABORT 0x31        // Abort ESB OTA update
 #define ESB_PONG_FLAG_OTA_SUPPRESS 0x32     // Suppress tracker during OTA (reduce poll rate)
 #define ESB_PONG_FLAG_OTA_UNSUPPRESS 0x33   // Resume normal poll rate after OTA
+#define ESB_PONG_FLAG_TCAL_HEAT_START 0xE0  // Private: start heated T-Cal with tracker defaults
 
 // Raw data collection packet types
 #define ESB_RAW_IMU_TYPE 0x10      // Raw IMU data (float, with piggybacked mag)

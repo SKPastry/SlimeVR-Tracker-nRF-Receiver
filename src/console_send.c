@@ -367,7 +367,9 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 		return;
 	} else if (strcmp(arg2, "tcal") == 0) {
 		if (!arg3) {
-			printk("Usage: send <id|all> tcal <on|off|auto on|auto off|boot on|boot off|clear>\n");
+			printk(
+				"Usage: send <id|all> tcal <on|off|auto on|auto off|boot on|boot off|clear|heat start>\n"
+			);
 			printk("Example: send 0 tcal on       - Enable temperature calibration on tracker 0\n");
 			printk(
 				"Example: send all tcal off    - Disable temperature calibration on all active trackers\n"
@@ -376,6 +378,7 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 			printk("Example: send all tcal auto off - Disable auto-calibration on all active trackers\n");
 			printk("Example: send 0 tcal boot on - Enable boot calibration on tracker 0\n");
 			printk("Example: send 0 tcal clear - Clear temperature calibration on tracker 0\n");
+			printk("Example: send 0 tcal heat start - Start heated T-Cal on tracker 0\n");
 			return;
 		}
 
@@ -427,8 +430,23 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 			}
 
 			console_send_flag(target_all, tracker_id, tcal_cmd, tcal_name);
+		} else if (strcmp(arg3, "heat") == 0) {
+			if (!arg4 || strcmp(arg4, "start") != 0 || arg5) {
+				printk("Usage: send <id|all> tcal heat start\n");
+				return;
+			}
+
+			console_send_flag(
+				target_all,
+				tracker_id,
+				ESB_PONG_FLAG_TCAL_HEAT_START,
+				"Heated T-Cal start"
+			);
 		} else {
-			printk("Unknown tcal subcommand: %s (use 'on', 'off', 'auto', 'boot' or 'clear')\n", arg3);
+			printk(
+				"Unknown tcal subcommand: %s (use 'on', 'off', 'auto', 'boot', 'clear' or 'heat')\n",
+				arg3
+			);
 		}
 		return;
 	} else if (strcmp(arg2, "tdma") == 0) {

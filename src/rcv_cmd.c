@@ -556,7 +556,9 @@ uint8_t rcv_cmd_tracker_channel_clear_all(void)
 
 uint8_t rcv_cmd_remote_flag(uint8_t target_id, uint8_t pong_flag)
 {
-	if (!rcv_hid_opcode_is_pong_flag(pong_flag)) {
+	/* Keep the private high ESB flag available to console without assigning a HID opcode. */
+	if (!rcv_hid_opcode_is_pong_flag(pong_flag) &&
+	    pong_flag != ESB_PONG_FLAG_TCAL_HEAT_START) {
 		return RCV_HID_ST_EINVAL;
 	}
 	if (target_id == RCV_HID_TARGET_ALL) {
