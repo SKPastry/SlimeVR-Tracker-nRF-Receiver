@@ -8,6 +8,7 @@ on:
       - dev
       - devc
       - main
+      - "feat/**"
   create:
   workflow_dispatch:
 
