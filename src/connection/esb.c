@@ -33,6 +33,7 @@
 #include "system/system.h"
 #include "data_collect.h"
 #include "esb_ota.h"
+#include "remote_tcal.h"
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
@@ -101,6 +102,7 @@ static inline uint32_t tdma_pack_config(uint8_t slot, uint8_t total, uint8_t slo
 
 /* Forward declaration — defined after last_ping_time / PING_TIMEOUT_MS */
 static void tdma_recalculate(void);
+static bool esb_remote_command_is_critical(uint8_t command_flag);
 
 static struct esb_payload rx_payload;
 
@@ -1047,6 +1049,28 @@ static void esb_ack_handler_cb(const uint8_t *pdu_data, uint8_t data_length,
 		ack_payload->data[2] = counter;
 		ack_payload->data[7] = cmd;
 
+		bool force_remote_tcal_normal = false;
+		if (remote_tcal_fill_pong_isr(
+			    tracker_id, pdu_data, k_uptime_get_32(),
+			    ack_payload->data,
+			    &force_remote_tcal_normal)) {
+			ack_payload->data[ESB_PONG_LEN - 1] =
+				crc8_ccitt(0x07, ack_payload->data,
+					   ESB_PONG_LEN - 1);
+			*has_ack_payload = true;
+			return;
+		}
+		if (force_remote_tcal_normal &&
+		    !esb_remote_command_is_critical(cmd)) {
+			/*
+			 * The result was already saved, is stale, or is structurally
+			 * invalid.  Complete the Tracker's result withdrawal before an
+			 * ordinary legacy flag is allowed onto the wire.
+			 */
+			cmd = ESB_PONG_FLAG_NORMAL;
+			ack_payload->data[7] = cmd;
+		}
+
 		if (cmd == ESB_PONG_FLAG_SENS_SET) {
 			/* SENS_SET overrides time sync bytes with sensitivity data */
 			int16_t s0 = pending_sens_data[tracker_id][0];
@@ -1493,6 +1517,13 @@ void event_handler(struct esb_evt const *event)
 						bool is_out_of_order = false;
 						bool is_large_gap = false;
 						bool is_tracker_restart = false;
+						uint64_t previous_ping_time =
+							last_ping_time[tracker_id];
+						uint64_t ping_gap_ms =
+							previous_ping_time > 0U
+								? current_time -
+									  previous_ping_time
+								: 0U;
 
 						// Check for timeout - if no PING received for more than 5 seconds, reset expectation
 						if (last_ping_time[tracker_id] > 0
@@ -1505,7 +1536,32 @@ void event_handler(struct esb_evt const *event)
 							last_ping_counter[tracker_id] = counter;
 							last_ping_time[tracker_id] = current_time;
 							last_pong_queued_counter[tracker_id] = 0xFF;
+							remote_tcal_reset_tracker(tracker_id);
 							// Continue processing this PING
+						} else if (
+							counter <
+								last_ping_counter[tracker_id] ||
+							(counter ==
+							 last_ping_counter[tracker_id] &&
+							 ping_gap_ms >
+								 REMOTE_TCAL_PING_RETRY_WINDOW_MS)) {
+							/*
+							 * There is no boot nonce on the PING wire format.
+							 * Treat every raw numeric decline/wrap, including
+							 * natural 255->0, as a conservative session boundary.
+							 * A same-counter packet well outside the normal radio
+							 * retransmission window likewise covers reboot 0->0.
+							 * This may safely cancel a cross-wrap task, but never
+							 * lets a prior boot satisfy command evidence.
+							 */
+							LOG_WRN(
+								"PING session boundary: id=%u old_ctr=%u new_ctr=%u gap=%llu ms",
+								tracker_id,
+								last_ping_counter[tracker_id],
+								counter, ping_gap_ms);
+							is_tracker_restart = true;
+							last_ping_time[tracker_id] =
+								current_time;
 						} else {
 							// Calculate difference
 							int counter_diff = (int)counter - (int)last_ping_counter[tracker_id];
@@ -1563,6 +1619,7 @@ void event_handler(struct esb_evt const *event)
 						if (is_tracker_restart) {
 							// Tracker restarted, reset counter tracking
 							last_ping_counter[tracker_id] = counter;
+							remote_tcal_reset_tracker(tracker_id);
 							// Reset PONG queue tracking
 							last_pong_queued_counter[tracker_id] = 0xFF;
 							// Continue processing this PING, send PONG
@@ -1610,9 +1667,22 @@ void event_handler(struct esb_evt const *event)
 						if (!is_out_of_order) {
 							last_ping_counter[tracker_id] = counter;
 						}
-					} // End of else branch for ping_counter_initialized
+						} // End of else branch for ping_counter_initialized
 
-					if (ping_ack_flag != ESB_PONG_FLAG_NORMAL) {
+						/*
+						 * Publish capability/result state only after sequence
+						 * validation.  Old, duplicate-skipped, and out-of-order
+						 * packets must not provide remote command evidence.
+						 */
+						remote_tcal_process_ping(
+							tracker_id, rx_payload.data,
+							k_uptime_get_32());
+
+						if (ping_ack_flag != ESB_PONG_FLAG_NORMAL
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+					    && ping_ack_flag != SK_ESB_EXT_ESCAPE
+#endif
+					) {
 						if (tracker_remote_command[tracker_id] == ping_ack_flag) {
 							tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
 							LOG_DBG(
@@ -1677,6 +1747,10 @@ void event_handler(struct esb_evt const *event)
 				int seq_result = check_packet_sequence(tracker_id, received_sequence);
 				// Decide whether to forward the packet based on the sequence check result
 				// seq_result: 0=normal, 1=potential loss, 2=out of order, 3=reboot, 4=duplicate
+				if (seq_result == 3) {
+					/* Data traffic can reveal a reboot before the next PING. */
+					remote_tcal_reset_tracker(tracker_id);
+				}
 				if (seq_result == 4) {
 					LOG_DBG("TRK %d: Duplicate packet seq=%d, dropped", tracker_id, received_sequence);
 					// Drop duplicate packet
@@ -1781,6 +1855,10 @@ handle_composite_packet:
 				/* Sequence byte is at the very end of the composite packet */
 				uint8_t received_sequence = rx_payload.data[rx_payload.length - 1];
 				int seq_result = check_packet_sequence(tracker_id, received_sequence);
+				if (seq_result == 3) {
+					/* Composite traffic can reveal a reboot before the next PING. */
+					remote_tcal_reset_tracker(tracker_id);
+				}
 				if (seq_result == 2) {
 					LOG_WRN(
 						"TRK %d: Composite packet seq=%d is out-of-order, dropped",
@@ -2123,6 +2201,7 @@ void esb_pop_pair(void)
 	k_mutex_unlock(&tracker_store_lock);
 
 	if (removed_id >= 0) {
+		remote_tcal_reset_tracker((uint8_t)removed_id);
 		uint8_t count = stored_trackers;
 		nvs_write_async(STORED_TRACKERS, &count, sizeof(count));
 		uint64_t zero_addr = 0;
@@ -2182,6 +2261,7 @@ static bool esb_parse_pair(const uint8_t packet[8])
 void esb_start_pairing(void)
 {
 	LOG_INF("Pairing mode enabled (unified)");
+	remote_tcal_reset_all();
 	esb_pairing = true;
 	pairing_start_time = k_uptime_get();
 	pairing_target_count = 0; // No limit
@@ -2193,6 +2273,7 @@ void esb_start_pairing(void)
 void esb_start_pairing_with_count(uint8_t target_count)
 {
 	LOG_INF("Pairing mode enabled (unified), target count: %u", target_count);
+	remote_tcal_reset_all();
 	esb_pairing = true;
 	pairing_start_time = k_uptime_get();
 	pairing_target_count = target_count;
@@ -2276,6 +2357,7 @@ void esb_clear(void)
 	LOG_INF("Packet sequence state and statistics reset for all trackers");
 
 	hid_reset_all_rssi_smooth();
+	remote_tcal_reset_all();
 	esb_clearing = false;
 }
 
@@ -2293,8 +2375,28 @@ void esb_reset_tracker_sequence(uint8_t tracker_id)
 		memset(&tracker_stats[tracker_id], 0, sizeof(struct packet_stats));
 		// Reset RSSI smoothing state
 		hid_reset_rssi_smooth(tracker_id);
+		remote_tcal_reset_tracker(tracker_id);
 		LOG_INF("Packet sequence state and statistics reset for tracker %d", tracker_id);
 	}
+}
+
+/*
+ * Keep this list in lockstep with Tracker
+ * remote_tcal_is_critical_legacy_command().  These transitions must not wait
+ * behind an experimental extension transaction.
+ */
+static bool esb_remote_command_is_critical(uint8_t command_flag)
+{
+	return command_flag == ESB_PONG_FLAG_SHUTDOWN ||
+	       command_flag == ESB_PONG_FLAG_REBOOT ||
+	       command_flag == ESB_PONG_FLAG_CLEAR ||
+	       command_flag == ESB_PONG_FLAG_DFU ||
+	       command_flag == ESB_PONG_FLAG_DFU_OTA ||
+	       command_flag == ESB_PONG_FLAG_SCAN ||
+	       command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON ||
+	       command_flag == ESB_PONG_FLAG_DATA_COLLECT_OFF ||
+	       (command_flag >= ESB_PONG_FLAG_OTA_QUERY_INFO &&
+		command_flag <= ESB_PONG_FLAG_OTA_UNSUPPRESS);
 }
 
 void esb_send_remote_command_sens(uint8_t tracker_id, float x, float y, float z)
@@ -2302,11 +2404,38 @@ void esb_send_remote_command_sens(uint8_t tracker_id, float x, float y, float z)
 	if (tracker_id >= MAX_TRACKERS) {
 		return;
 	}
-	pending_sens_data[tracker_id][0] = (int16_t)(x * 100.0f);
-	pending_sens_data[tracker_id][1] = (int16_t)(y * 100.0f);
-	pending_sens_data[tracker_id][2] = (int16_t)(z * 100.0f);
-	tracker_remote_command[tracker_id] = ESB_PONG_FLAG_SENS_SET;
+	int16_t sens_x = (int16_t)(x * 100.0f);
+	int16_t sens_y = (int16_t)(y * 100.0f);
+	int16_t sens_z = (int16_t)(z * 100.0f);
+	unsigned int key = irq_lock();
+	bool blocked = remote_tcal_tracker_pending(tracker_id);
+	if (!blocked) {
+		pending_sens_data[tracker_id][0] = sens_x;
+		pending_sens_data[tracker_id][1] = sens_y;
+		pending_sens_data[tracker_id][2] = sens_z;
+		tracker_remote_command[tracker_id] =
+			ESB_PONG_FLAG_SENS_SET;
+	}
+	irq_unlock(key);
+	if (blocked) {
+		LOG_WRN("SENS_SET not queued: heated T-Cal pending for tracker %u",
+			tracker_id);
+		return;
+	}
 	LOG_INF("Queued SENS_SET for tracker %u: %.2f, %.2f, %.2f", tracker_id, (double)x, (double)y, (double)z);
+}
+
+bool esb_remote_command_pending(uint8_t tracker_id)
+{
+	return tracker_id < MAX_TRACKERS &&
+	       tracker_remote_command[tracker_id] != ESB_PONG_FLAG_NORMAL;
+}
+
+bool esb_critical_remote_command_pending(uint8_t tracker_id)
+{
+	return tracker_id < MAX_TRACKERS &&
+	       esb_remote_command_is_critical(
+		       tracker_remote_command[tracker_id]);
 }
 
 bool esb_send_remote_command_sens_auto(uint8_t tracker_id, uint8_t axis, uint16_t revolutions)
@@ -2314,7 +2443,6 @@ bool esb_send_remote_command_sens_auto(uint8_t tracker_id, uint8_t axis, uint16_
 	if (tracker_id >= MAX_TRACKERS) {
 		return false;
 	}
-
 	int64_t now = k_uptime_get();
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
 	bool active = tracker_id < stored_trackers && stored_tracker_addr[tracker_id] != 0 &&
@@ -2325,10 +2453,21 @@ bool esb_send_remote_command_sens_auto(uint8_t tracker_id, uint8_t axis, uint16_
 		LOG_WRN("SENS_AUTO not queued for inactive tracker %u", tracker_id);
 		return false;
 	}
-	pending_sens_auto_axis[tracker_id] = axis;
-	pending_sens_auto_revolutions[tracker_id] = revolutions;
-	tracker_remote_command[tracker_id] = ESB_PONG_FLAG_SENS_AUTO;
+	unsigned int key = irq_lock();
+	bool blocked = remote_tcal_tracker_pending(tracker_id);
+	if (!blocked) {
+		pending_sens_auto_axis[tracker_id] = axis;
+		pending_sens_auto_revolutions[tracker_id] = revolutions;
+		tracker_remote_command[tracker_id] =
+			ESB_PONG_FLAG_SENS_AUTO;
+	}
+	irq_unlock(key);
 	k_mutex_unlock(&tracker_store_lock);
+	if (blocked) {
+		LOG_WRN("SENS_AUTO not queued: heated T-Cal pending for tracker %u",
+			tracker_id);
+		return false;
+	}
 
 	if (revolutions == 0) {
 		LOG_INF("Queued SENS_AUTO for tracker %u: axis=%u, revolutions=default", tracker_id, axis);
@@ -2346,14 +2485,18 @@ uint8_t esb_send_remote_command_sens_auto_all(uint8_t axis, uint16_t revolutions
 	k_msleep(REMOTE_COMMAND_ACTIVE_SCAN_MS);
 
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	unsigned int key = irq_lock();
 	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
-		if (stored_tracker_addr[i] != 0 && tracker_stats[i].last_packet_time >= scan_start_time) {
+		if (stored_tracker_addr[i] != 0 &&
+		    tracker_stats[i].last_packet_time >= scan_start_time &&
+		    !remote_tcal_tracker_pending(i)) {
 			pending_sens_auto_axis[i] = axis;
 			pending_sens_auto_revolutions[i] = revolutions;
 			tracker_remote_command[i] = ESB_PONG_FLAG_SENS_AUTO;
 			count++;
 		}
 	}
+	irq_unlock(key);
 	k_mutex_unlock(&tracker_store_lock);
 
 	if (revolutions == 0) {
@@ -2377,17 +2520,49 @@ uint8_t esb_send_remote_command_sens_auto_all(uint8_t axis, uint16_t revolutions
 void esb_send_remote_command_channel(uint8_t tracker_id, uint8_t channel)
 {
 	if (tracker_id < MAX_TRACKERS) {
-		tracker_remote_command[tracker_id] = ESB_PONG_FLAG_SET_CHANNEL;
-		tracker_channel_value = channel;
+		unsigned int key = irq_lock();
+		bool blocked = remote_tcal_tracker_pending(tracker_id);
+		if (!blocked) {
+			tracker_remote_command[tracker_id] =
+				ESB_PONG_FLAG_SET_CHANNEL;
+			tracker_channel_value = channel;
+		}
+		irq_unlock(key);
+		if (blocked) {
+			LOG_WRN("SET_CHANNEL not queued: heated T-Cal pending for tracker %u",
+				tracker_id);
+			return;
+		}
 		LOG_INF("Queued SET_CHANNEL %u for tracker %u", channel, tracker_id);
 	}
 }
 
 // Send remote command to specified tracker
-void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
+bool esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 {
 	if (tracker_id < MAX_TRACKERS) {
-		tracker_remote_command[tracker_id] = command_flag;
+		unsigned int key = irq_lock();
+		bool critical =
+			esb_remote_command_is_critical(command_flag);
+		bool extension_pending =
+			remote_tcal_tracker_pending(tracker_id);
+		bool queued =
+			command_flag == ESB_PONG_FLAG_NORMAL ||
+			remote_tcal_prepare_legacy_command_locked(
+				tracker_id, critical);
+		if (queued) {
+			tracker_remote_command[tracker_id] = command_flag;
+		}
+		irq_unlock(key);
+		if (!queued) {
+			LOG_WRN("Remote command 0x%02X not queued: heated T-Cal pending for tracker %u",
+				command_flag, tracker_id);
+			return false;
+		}
+		if (critical && extension_pending) {
+			LOG_WRN("Critical remote command 0x%02X preempted heated T-Cal for tracker %u; prior outcome remains unknown",
+				command_flag, tracker_id);
+		}
 
 		/* Reset ARQ state when data collection starts */
 		if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON) {
@@ -2524,8 +2699,10 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 			break;
 		}
 		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", cmd_name, command_flag, tracker_id);
+		return true;
 	} else {
 		LOG_ERR("Invalid tracker ID: %d", tracker_id);
+		return false;
 	}
 }
 
@@ -2651,9 +2828,22 @@ void esb_send_remote_command_all(uint8_t command_flag)
 	k_msleep(REMOTE_COMMAND_ACTIVE_SCAN_MS);
 
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	unsigned int key = irq_lock();
+	uint16_t queued_mask = 0U;
+	bool critical = esb_remote_command_is_critical(command_flag);
 	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
-		if (stored_tracker_addr[i] != 0 && tracker_stats[i].last_packet_time >= scan_start_time) {
+		if (stored_tracker_addr[i] != 0 &&
+		    tracker_stats[i].last_packet_time >= scan_start_time &&
+		    (command_flag == ESB_PONG_FLAG_NORMAL ||
+		     remote_tcal_prepare_legacy_command_locked(
+			     i, critical))) {
 			tracker_remote_command[i] = command_flag;
+			queued_mask |= BIT(i);
+		}
+	}
+	irq_unlock(key);
+	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
+		if ((queued_mask & BIT(i)) != 0U) {
 			if (active_tracker_ids_len < sizeof(active_tracker_ids)) {
 				int written = snprintk(
 					&active_tracker_ids[active_tracker_ids_len],

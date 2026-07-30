@@ -96,6 +96,16 @@ config DATA_COLLECT_HID
         When enabled, raw data is sent via a dedicated HID endpoint.
         When disabled, raw data is sent via a second CDC ACM serial port.
 
+config SK_REMOTE_HEATED_TCAL_TEST
+    bool "Enable experimental remote heated temperature calibration"
+    default n
+    select ENTROPY_GENERATOR
+    help
+        Enable the private SK version 1 ESB/HID extension used to start,
+        stop, or abort heated temperature calibration from the receiver.
+        This is a test-only protocol and is intentionally disabled by
+        default while an upstream command allocation is pending.
+
 config SLIMEVR_USB_DEVICE_VID
     hex "SlimeVR USB vendor ID"
     default 0x1209

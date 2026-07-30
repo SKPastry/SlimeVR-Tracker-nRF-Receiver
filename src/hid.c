@@ -25,6 +25,7 @@
 #include "connection/esb.h"
 #include "esb_ota.h"
 #include "receiver_ota.h"
+#include "remote_tcal.h"
 #include "usb.h"
 
 #include <limits.h>
@@ -48,10 +49,34 @@ atomic_t report_read_index = 0;
 // read_index == write_index -> empty fifo
 // (write_index + 1) % MAX_REPORTS == read_index -> full fifo
 
+/*
+ * Control ACKs have an independent, higher-priority FIFO.  They must not be
+ * sent through the tracker report path because that path rewrites RSSI and
+ * historically stopped entirely when no tracker was paired.
+ */
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+#define MAX_CONTROL_ACKS 32
+static struct tracker_report control_acks[MAX_CONTROL_ACKS];
+static uint8_t control_ack_read_index;
+static uint8_t control_ack_write_index;
+static uint32_t control_session_generation = 1U;
+static struct k_spinlock control_ack_lock;
+#endif
+
 static const struct device *hdev;
 static ATOMIC_DEFINE(hid_ep_in_busy, 1);
 static bool hid_ready;
 static uint32_t hid_idle_duration_ms;
+
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+struct hid_output_command {
+	uint16_t len;
+	uint32_t session_generation;
+	uint8_t data[64];
+};
+
+K_MSGQ_DEFINE(hid_output_command_msgq, sizeof(struct hid_output_command), 32, 4);
+#endif
 
 #define HID_EP_BUSY_FLAG	0
 #define REPORT_PERIOD		K_MSEC(1) // streaming reports
@@ -204,29 +229,69 @@ static void send_report(struct k_work *work)
 	if (!receiver_usb_is_enabled()) return;
 	if (!receiver_usb_is_configured()) return;
 	if (!hid_ready) return;
-	if (!stored_trackers) return;
 
 	// Get current FIFO status atomically
 	size_t write_idx = (size_t)atomic_get(&report_write_index);
 	size_t read_idx = (size_t)atomic_get(&report_read_index);
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+	k_spinlock_key_t control_key = k_spin_lock(&control_ack_lock);
+	bool has_control_ack =
+		control_ack_read_index != control_ack_write_index;
+	k_spin_unlock(&control_ack_lock, control_key);
+#else
+	if (!stored_trackers) {
+		return;
+	}
+	bool has_control_ack = false;
+#endif
 
-	if (write_idx == read_idx && k_uptime_get() - 100 < last_registration_sent) {
+	if (write_idx == read_idx && !has_control_ack && !stored_trackers) {
+		return;
+	}
+	if (write_idx == read_idx && !has_control_ack &&
+	    k_uptime_get() - 100 < last_registration_sent) {
 		return; // send registrations only every 100ms
 	}
 
 	int ret;
 
 	if (!atomic_test_and_set_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG)) {
+		size_t epind = 0;
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+		size_t control_to_send = 0;
+		uint32_t control_generation_to_send = 0U;
+		uint8_t control_snapshot_read = 0U;
+		uint8_t control_next_read = 0;
+
+		/* Snapshot priority ACKs.  They are consumed only after submit succeeds. */
+		control_key = k_spin_lock(&control_ack_lock);
+		control_generation_to_send = control_session_generation;
+		control_snapshot_read = control_ack_read_index;
+		control_next_read = control_ack_read_index;
+		while (control_next_read != control_ack_write_index &&
+		       epind < HID_EP_REPORT_COUNT) {
+			ep_report_buffer[epind++] =
+				control_acks[control_next_read];
+			control_next_read++;
+			if (control_next_read == MAX_CONTROL_ACKS) {
+				control_next_read = 0;
+			}
+			control_to_send++;
+		}
+		k_spin_unlock(&control_ack_lock, control_key);
+#endif
+
 		// Calculate how many reports we have available
 		int available_reports = write_idx - read_idx;
 		if (available_reports < 0) available_reports += MAX_REPORTS;
-		size_t reports_to_send = (size_t) MIN(available_reports, HID_EP_REPORT_COUNT);
+		size_t reports_to_send = (size_t)MIN(
+			available_reports, HID_EP_REPORT_COUNT - epind);
 		size_t next_read_idx = read_idx;
 
-		int epind;
 		// Copy existing data to buffer
-		for (epind = 0; epind < reports_to_send; epind++) {
+		for (size_t copied = 0; copied < reports_to_send; copied++) {
 			ep_report_buffer[epind] = reports[next_read_idx];
+			epind++;
 			next_read_idx++;
 			if (next_read_idx == MAX_REPORTS) {
 				next_read_idx = 0;
@@ -238,8 +303,34 @@ static void send_report(struct k_work *work)
 			if (stored_trackers > 0) {
 				packet_device_addr(ep_report_buffer[epind].data, sent_device_addr);
 				sent_device_addr = (sent_device_addr + 1) % stored_trackers;
+			} else {
+				memset(ep_report_buffer[epind].data, 0,
+				       sizeof(ep_report_buffer[epind].data));
 			}
 		}
+
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+		if (control_to_send > 0U) {
+			/*
+			 * Revalidate immediately before submission.  A disconnect and
+			 * rapid reconnect after the snapshot must not deliver an old
+			 * session's ACK buffer to the new host.
+			 */
+			control_key = k_spin_lock(&control_ack_lock);
+			bool control_snapshot_valid =
+				control_session_generation ==
+					control_generation_to_send &&
+				control_ack_read_index ==
+					control_snapshot_read;
+			k_spin_unlock(&control_ack_lock, control_key);
+			if (!control_snapshot_valid) {
+				atomic_clear_bit(hid_ep_in_busy,
+						 HID_EP_BUSY_FLAG);
+				k_work_submit(&report_send);
+				return;
+			}
+		}
+#endif
 
 		ret = hid_device_submit_report(hdev, sizeof(report) * HID_EP_REPORT_COUNT,
 					       (uint8_t *)ep_report_buffer);
@@ -254,6 +345,24 @@ static void send_report(struct k_work *work)
 			}
 		} else {
 			last_registration_sent = k_uptime_get();
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+			if (control_to_send > 0U) {
+				control_key = k_spin_lock(&control_ack_lock);
+				/*
+				 * A disconnect can clear the FIFO after the snapshot and a
+				 * reconnect can already enqueue a new-session ACK at the same
+				 * indices.  Never consume that new queue with an old submit.
+				 */
+				if (control_session_generation ==
+					    control_generation_to_send &&
+				    control_ack_read_index ==
+					    control_snapshot_read) {
+					control_ack_read_index =
+						control_next_read;
+				}
+				k_spin_unlock(&control_ack_lock, control_key);
+			}
+#endif
 			if (reports_to_send > 0U) {
 				atomic_set(&report_read_index, (atomic_val_t)next_read_idx);
 				hid_stats_record_reports((uint32_t)reports_to_send);
@@ -264,6 +373,48 @@ static void send_report(struct k_work *work)
 		//LOG_DBG("HID IN endpoint busy");
 	}
 }
+
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+uint32_t hid_control_session_generation(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&control_ack_lock);
+	uint32_t generation = control_session_generation;
+	k_spin_unlock(&control_ack_lock, key);
+	return generation;
+}
+
+int hid_control_ack_enqueue(const uint8_t data[16],
+			    uint32_t session_generation)
+{
+	if (data == NULL) {
+		return -EINVAL;
+	}
+	if (!receiver_usb_is_configured()) {
+		return -ENOTCONN;
+	}
+
+	k_spinlock_key_t key = k_spin_lock(&control_ack_lock);
+	if (session_generation != control_session_generation) {
+		k_spin_unlock(&control_ack_lock, key);
+		return -ESTALE;
+	}
+	uint8_t next = control_ack_write_index + 1U;
+	if (next == MAX_CONTROL_ACKS) {
+		next = 0U;
+	}
+	if (next == control_ack_read_index) {
+		k_spin_unlock(&control_ack_lock, key);
+		LOG_ERR("Control ACK FIFO full");
+		return -ENOSPC;
+	}
+
+	memcpy(control_acks[control_ack_write_index].data, data, 16);
+	control_ack_write_index = next;
+	k_spin_unlock(&control_ack_lock, key);
+	k_work_submit(&report_send);
+	return 0;
+}
+#endif
 
 #define DROPPED_REPORT_LOG_INTERVAL 1000  // Log every 1 second when stats enabled
 
@@ -365,6 +516,21 @@ static void handle_output_report(const uint8_t *buf, uint16_t len)
 	}
 
 	uint8_t report_type = buf[0];
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+	if (report_type == 254U) {
+		struct hid_output_command command = {
+			.len = len,
+			.session_generation =
+				hid_control_session_generation(),
+		};
+		memcpy(command.data, buf, len);
+		if (k_msgq_put(&hid_output_command_msgq, &command,
+			       K_NO_WAIT) != 0) {
+			LOG_WRN("HID command queue full");
+		}
+		return;
+	}
+#endif
 	if (report_type >= 0xF0 && report_type <= 0xF7) {
 		if (len >= 2 && buf[1] == RECEIVER_OTA_ID) {
 			receiver_ota_process_hid(buf, len);
@@ -373,6 +539,23 @@ static void handle_output_report(const uint8_t *buf, uint16_t len)
 		}
 	}
 }
+
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+static void hid_output_command_thread(void)
+{
+	struct hid_output_command command;
+
+	while (true) {
+		k_msgq_get(&hid_output_command_msgq, &command, K_FOREVER);
+		remote_tcal_hid_handle_report(
+			command.data, command.len,
+			command.session_generation);
+	}
+}
+
+K_THREAD_DEFINE(hid_output_command_thread_id, 1024,
+		hid_output_command_thread, NULL, NULL, NULL, 6, 0, 0);
+#endif
 
 static void int_in_ready_cb(const struct device *dev)
 {
@@ -502,6 +685,17 @@ static void hid_usb_state_changed(bool configured)
 	if (!configured) {
 		hid_ready = false;
 		atomic_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG);
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+		k_spinlock_key_t key = k_spin_lock(&control_ack_lock);
+		control_session_generation++;
+		if (control_session_generation == 0U) {
+			control_session_generation = 1U;
+		}
+		control_ack_read_index = 0U;
+		control_ack_write_index = 0U;
+		k_spin_unlock(&control_ack_lock, key);
+		k_msgq_purge(&hid_output_command_msgq);
+#endif
 	}
 }
 
@@ -573,6 +767,9 @@ void hid_write_packet_n(uint8_t *data, uint8_t rssi)
 	/* Types 1, 4: full-precision quat+accel — no room for RSSI.
 	 * Types 0xF0-0xF7: OTA reports use all 16 bytes — no room for RSSI. */
 	if (data[0] != 1 && data[0] != 4 &&
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+	    data[0] != 251 &&
+#endif
 	    !(data[0] >= 0xF0 && data[0] <= 0xF7)) {
 		uint8_t tracker_id = data[1];
 		uint8_t smoothed_rssi = rssi_smooth_update(tracker_id, (int8_t)rssi);

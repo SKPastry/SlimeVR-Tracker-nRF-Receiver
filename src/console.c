@@ -37,10 +37,14 @@
 #include "connection/rssi_scan.h"
 #include "data_collect.h"
 #include "esb_ota.h"
+#include "remote_tcal.h"
 
 #include <ctype.h>
 #include <stdlib.h>
 #include <errno.h>
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+#include <math.h>
+#endif
 
 #define DFU_DBL_RESET_MEM 0x20007F7C
 #define DFU_DBL_RESET_APP 0x4ee5677e
@@ -148,6 +152,105 @@ static void print_meow(void)
 
 	printk("%s%s%s\n", meows[meow], meow_punctuations[punctuation], meow_suffixes[suffix]);
 }
+
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+static void console_remote_tcal_complete(
+	const struct remote_tcal_outcome *outcome, void *user_data)
+{
+	ARG_UNUSED(user_data);
+	printk("Heated T-Cal tx=%u complete: considered=0x%04X reply=0x%04X\n",
+	       outcome->transaction_id, outcome->considered_mask,
+	       outcome->reply_mask);
+	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+		if ((outcome->considered_mask & BIT(i)) != 0U) {
+			printk("  tracker %u: %s\n", i,
+			       remote_tcal_result_name(outcome->status[i]));
+		}
+	}
+	if (outcome->reply_mask != outcome->considered_mask) {
+		printk("Warning: NO_RESPONSE means the result is unknown; START may "
+		       "have executed. Send STOP or ABORT if needed.\n");
+	}
+}
+
+static int parse_tcal_temperature(const char *text, int16_t *centi_c)
+{
+	char *endptr;
+	errno = 0;
+	double value = strtod(text, &endptr);
+	if (text == endptr || *endptr != '\0' || errno == ERANGE ||
+	    !isfinite(value)) {
+		return -EINVAL;
+	}
+	double scaled = value * 100.0;
+	if (scaled < INT16_MIN || scaled > INT16_MAX) {
+		return -ERANGE;
+	}
+	*centi_c = (int16_t)(scaled >= 0.0 ? scaled + 0.5 : scaled - 0.5);
+	return 0;
+}
+
+static void console_submit_remote_tcal(bool target_all, uint8_t tracker_id,
+				       const char *action_text,
+				       const char *temperature_text)
+{
+	if (action_text == NULL ||
+	    (strcmp(action_text, "start") != 0 &&
+	     strcmp(action_text, "stop") != 0 &&
+	     strcmp(action_text, "abort") != 0)) {
+		printk("Usage: send <id|all> tcal heat start [target_C]\n");
+		printk("       send <id|all> tcal heat stop\n");
+		printk("       send <id|all> tcal heat abort\n");
+		printk("P00 currently accepts 10-45 C; Tracker validates the final range.\n");
+		return;
+	}
+
+	uint8_t action;
+	int16_t target_centi_c = 0;
+	if (strcmp(action_text, "start") == 0) {
+		action = SK_REMOTE_TCAL_ACTION_START;
+		target_centi_c = SK_REMOTE_TCAL_DEFAULT_CENTI_C;
+		if (temperature_text != NULL &&
+		    parse_tcal_temperature(temperature_text,
+					   &target_centi_c) != 0) {
+			printk("Invalid target temperature '%s'; use a finite encodable value.\n",
+			       temperature_text);
+			return;
+		}
+		if (temperature_text != NULL &&
+		    (target_centi_c < 1000 || target_centi_c > 4500)) {
+			printk("Note: current P00 range is 10-45 C; Tracker may return INVALID.\n");
+		}
+	} else {
+		action = strcmp(action_text, "stop") == 0
+				 ? SK_REMOTE_TCAL_ACTION_STOP
+				 : SK_REMOTE_TCAL_ACTION_ABORT;
+		if (temperature_text != NULL) {
+			printk("STOP/ABORT do not accept a temperature.\n");
+			return;
+		}
+	}
+
+	uint16_t transaction;
+	uint16_t considered;
+	int err = remote_tcal_submit(
+		target_all ? REMOTE_TCAL_TARGET_ALL : tracker_id,
+		action, target_centi_c, console_remote_tcal_complete, NULL,
+		&transaction, &considered);
+	if (err == -EBUSY) {
+		printk("Remote heated T-Cal busy.\n");
+	} else if (err == -ENOENT) {
+		printk("No recent eligible Tracker PING (freshness 2500 ms).\n");
+	} else if (err == -ENOTSUP) {
+		printk("Remote heated T-Cal unsupported or test feature disabled.\n");
+	} else if (err != 0) {
+		printk("Invalid remote heated T-Cal request (%d).\n", err);
+	} else {
+		printk("Remote heated T-Cal STARTED: tx=%u considered=0x%04X\n",
+		       transaction, considered);
+	}
+}
+#endif
 
 static void print_help(void)
 {
@@ -849,7 +952,11 @@ static void console_thread(void)
 				} else if (strcmp(arg2, "tcal") == 0) {
 					// tcal command - supports "on/off", "auto on/off", "boot on/off" and "clear"
 					if (!arg3) {
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+						printk("Usage: send <id|all> tcal <on|off|auto on|auto off|boot on|boot off|clear|heat ...>\n");
+#else
 						printk("Usage: send <id|all> tcal <on|off|auto on|auto off|boot on|boot off|clear>\n");
+#endif
 						printk("Example: send 0 tcal on       - Enable temperature calibration on tracker 0\n");
 						printk("Example: send all tcal off    - Disable temperature calibration on all active trackers\n");
 						printk("Example: send 0 tcal auto on  - Enable auto-calibration on tracker 0\n");
@@ -859,6 +966,14 @@ static void console_thread(void)
 						continue;
 					}
 
+#if defined(CONFIG_SK_REMOTE_HEATED_TCAL_TEST) && CONFIG_SK_REMOTE_HEATED_TCAL_TEST
+					if (strcmp(arg3, "heat") == 0) {
+						console_submit_remote_tcal(
+							target_all, tracker_id,
+							arg4, arg5);
+						continue;
+					} else
+#endif
 					if (strcmp(arg3, "on") == 0) {
 						// Enable T-Cal
 						if (target_all) {
@@ -1042,22 +1157,37 @@ static void console_thread(void)
 		}
 		else if (strcmp(argv[0], command_collect) == 0) {
 #ifdef CONFIG_DATA_COLLECT
-			if (arg && strcmp(arg, "off") == 0) {
-				if (data_collect_is_active()) {
-					uint8_t tid = data_collect_get_target_id();
-					data_collect_stop();
-					esb_send_remote_command(tid, ESB_PONG_FLAG_DATA_COLLECT_OFF);
-					printk("Data collection stopped, sent OFF to tracker %u\n", tid);
-				} else {
-					printk("Data collection is not active\n");
-				}
-			} else if (arg) {
-				char *endptr = NULL;
-				unsigned long id = strtoul(arg, &endptr, 10);
-				if (endptr != arg && *endptr == '\0' && id < 255) {
-					data_collect_start((uint8_t)id);
-					esb_send_remote_command((uint8_t)id, ESB_PONG_FLAG_DATA_COLLECT_ON);
-					printk("Data collection started for tracker %u\n", (unsigned)id);
+				if (arg && strcmp(arg, "off") == 0) {
+					if (data_collect_is_active()) {
+						uint8_t tid = data_collect_get_target_id();
+						data_collect_stop();
+						if (esb_send_remote_command(
+							    tid,
+							    ESB_PONG_FLAG_DATA_COLLECT_OFF)) {
+							printk("Data collection stopped, sent OFF to tracker %u\n",
+							       tid);
+						} else {
+							printk("Data collection stopped locally, but OFF could not be queued for tracker %u\n",
+							       tid);
+						}
+					} else {
+						printk("Data collection is not active\n");
+					}
+				} else if (arg) {
+					char *endptr = NULL;
+					unsigned long id = strtoul(arg, &endptr, 10);
+					if (endptr != arg && *endptr == '\0' &&
+					    id < MAX_TRACKERS) {
+						data_collect_start((uint8_t)id);
+						if (!esb_send_remote_command(
+							    (uint8_t)id,
+							    ESB_PONG_FLAG_DATA_COLLECT_ON)) {
+							data_collect_stop();
+							printk("Data collection not started: ON could not be queued for tracker %u\n",
+							       (unsigned)id);
+							continue;
+						}
+						printk("Data collection started for tracker %u\n", (unsigned)id);
 					printk("Test mode enabled on tracker (prevents sleep)\n");
 					printk("Non-target trackers will receive SHUTDOWN\n");
 					printk("Use 'collect off' to stop\n");

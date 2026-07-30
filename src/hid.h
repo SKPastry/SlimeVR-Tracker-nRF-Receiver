@@ -26,6 +26,9 @@
 #include <stdint.h>
 
 void hid_write_packet_n(uint8_t* data, uint8_t rssi);
+int hid_control_ack_enqueue(const uint8_t data[16],
+			    uint32_t session_generation);
+uint32_t hid_control_session_generation(void);
 uint32_t hid_get_current_tps(void);
 void hid_reset_rssi_smooth(uint8_t tracker_id);
 void hid_reset_all_rssi_smooth(void);

@@ -79,6 +79,12 @@
 #define ESB_PONG_FLAG_OTA_SUPPRESS 0x32     // Suppress tracker during OTA (reduce poll rate)
 #define ESB_PONG_FLAG_OTA_UNSUPPRESS 0x33   // Resume normal poll rate after OTA
 
+/*
+ * Experimental private extension escape.  This is deliberately not a
+ * permanent ESB command allocation, and is separate from the HID opcode.
+ */
+#define SK_ESB_EXT_ESCAPE 0xC8
+
 // Raw data collection packet types
 #define ESB_RAW_IMU_TYPE    0x10  // Raw IMU data (float, with piggybacked mag)
 #define ESB_RAW_MAG_TYPE    0x11  // Raw magnetometer data (float, reserved)
@@ -124,7 +130,7 @@ bool esb_get_stats_detailed_enabled(void);      // Get current status
 uint32_t esb_get_stats_detailed_remaining(void); // Get remaining time (0 if no auto-disable)
 
 // Remote command API
-void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
+bool esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
 void esb_send_remote_command_all(uint8_t command_flag);
 void esb_send_remote_command_sens(uint8_t tracker_id, float x, float y, float z);
 bool esb_send_remote_command_sens_auto(uint8_t tracker_id, uint8_t axis, uint16_t revolutions);
@@ -136,6 +142,8 @@ void esb_clear_all_trackers_channel(void);          // Clear RF channel setting 
 void esb_set_receiver_channel(uint8_t channel); // Set receiver RF channel only (local)
 void esb_clear_receiver_channel(void);          // Clear receiver RF channel (restore default, local)
 uint8_t esb_get_receiver_channel(void);         // Get current receiver RF channel (returns 0xFF if default)
+bool esb_remote_command_pending(uint8_t tracker_id);
+bool esb_critical_remote_command_pending(uint8_t tracker_id);
 
 // Convenience wrappers for specific commands
 static inline void esb_request_tracker_shutdown(uint8_t tracker_id)
