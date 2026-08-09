@@ -2372,6 +2372,8 @@ static const char *esb_pong_flag_name(uint8_t flag)
 		return "MAG_AUTO_ON";
 	case ESB_PONG_FLAG_MAG_AUTO_OFF:
 		return "MAG_AUTO_OFF";
+	case ESB_PONG_FLAG_WOM:
+		return "WOM";
 	case ESB_PONG_FLAG_REBOOT:
 		return "REBOOT";
 	case ESB_PONG_FLAG_CLEAR:

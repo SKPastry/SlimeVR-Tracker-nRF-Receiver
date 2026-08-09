@@ -52,13 +52,15 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 		printk("Examples:\n");
 		printk("  send 0 shutdown      - Shutdown tracker 0\n");
 		printk("  send all shutdown    - Shutdown all active trackers\n");
+		printk("  send 0 wom           - Put tracker 0 in wake-on-motion standby\n");
+		printk("  send all wom         - Put all active trackers in wake-on-motion standby\n");
 		printk("  send 1 calibrate     - Calibrate tracker 1\n");
 		printk("  send all meow        - Make all active trackers meow\n");
 		printk("  send 2 reboot        - Reboot tracker 2\n");
 		printk("  send 3 clear         - Clear pairing on tracker 3\n");
 		printk("  send all dfu         - Enter DFU mode on all active trackers\n");
 		printk(
-			"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, sens, "
+			"Available commands: shutdown, wom, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, sens, "
 			"reset, ping, tcal, tdma, test\n"
 		);
 		return;
@@ -84,6 +86,9 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 	if (strcmp(arg2, "shutdown") == 0) {
 		cmd_flag = ESB_PONG_FLAG_SHUTDOWN;
 		cmd_name = "Shutdown";
+	} else if (strcmp(arg2, "wom") == 0) {
+		cmd_flag = ESB_PONG_FLAG_WOM;
+		cmd_name = "Wake-on-motion standby";
 	} else if (strcmp(arg2, "calibrate") == 0) {
 		cmd_flag = ESB_PONG_FLAG_CALIBRATE;
 		cmd_name = "Calibrate";
@@ -488,7 +493,7 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 	} else {
 		printk("Unknown command: %s\n", arg2);
 		printk(
-			"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu [ota], "
+			"Available commands: shutdown, wom, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu [ota], "
 			"fusion, sens, "
 			"reset, ping, tcal, tdma, test\n"
 		);
