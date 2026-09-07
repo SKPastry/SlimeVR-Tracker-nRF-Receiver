@@ -158,6 +158,8 @@ uint32_t esb_get_stats_detailed_remaining(void);        // Get remaining time (0
 
 // Remote command API
 void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
+/* Clear only a pending OTA abort command; preserves unrelated commands. */
+void esb_clear_remote_ota_abort(uint8_t tracker_id);
 void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8_t arg);
 /* Active-scan then queue. Returns bitmask of targeted tracker ids. Blocks ~1s. */
 uint32_t esb_send_remote_command_all(uint8_t command_flag);

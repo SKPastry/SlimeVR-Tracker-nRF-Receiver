@@ -84,6 +84,12 @@ struct ota_per_tracker {
 	int64_t last_hid_forward_time;       /* Throttle per-tracker HID status */
 };
 
+#define OTA_ABORT_TOMBSTONE_MS 10000
+
+static volatile uint32_t ota_abort_expiry_ticks[MAX_TRACKERS];
+#define OTA_ABORT_TOMBSTONE_TICKS k_ms_to_ticks_floor32(OTA_ABORT_TOMBSTONE_MS)
+static volatile bool ota_abort_valid[MAX_TRACKERS];
+
 static struct {
 	volatile bool active;
 	uint8_t num_targets;
@@ -197,6 +203,20 @@ static bool ring_full(void)
 	return ring_count() >= OTA_TX_RING_SIZE;
 }
 
+static uint8_t ota_crc8(const uint8_t *data, size_t len)
+{
+	uint8_t crc = 0x07;
+	for (size_t i = 0; i < len; i++) {
+		crc ^= data[i];
+		for (uint8_t bit = 0; bit < 8; bit++) {
+			crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
+		}
+	}
+	return crc;
+}
+
+static bool ota_abort_pending(uint8_t tracker_id);
+
 /* ── Tracker Suppression ─────────────────────────────────────────── */
 
 /*
@@ -206,7 +226,7 @@ static bool ring_full(void)
 static void suppress_non_ota_trackers(void)
 {
 	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
-		if (!ota_relay.tracker[i].participating) {
+		if (!ota_relay.tracker[i].participating && !ota_abort_pending(i)) {
 			esb_send_remote_command(i, ESB_PONG_FLAG_OTA_SUPPRESS);
 		}
 	}
@@ -215,7 +235,9 @@ static void suppress_non_ota_trackers(void)
 static void unsuppress_all_trackers(void)
 {
 	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
-		esb_send_remote_command(i, ESB_PONG_FLAG_OTA_UNSUPPRESS);
+		if (!ota_abort_pending(i)) {
+			esb_send_remote_command(i, ESB_PONG_FLAG_OTA_UNSUPPRESS);
+		}
 	}
 }
 
@@ -239,15 +261,11 @@ static void reset_session(void)
 
 static void remove_target(uint8_t tracker_id)
 {
-	if (tracker_id >= MAX_TRACKERS) {
+	if (tracker_id >= MAX_TRACKERS || !ota_relay.tracker[tracker_id].participating) {
 		return;
-	}
-	if (!ota_relay.tracker[tracker_id].participating) {
-		return;  /* Already removed */
 	}
 	ota_relay.tracker[tracker_id].participating = false;
 
-	/* Rebuild target_ids array */
 	uint8_t new_count = 0;
 	for (uint8_t i = 0; i < ota_relay.num_targets; i++) {
 		if (ota_relay.target_ids[i] != tracker_id) {
@@ -255,7 +273,6 @@ static void remove_target(uint8_t tracker_id)
 		}
 	}
 	ota_relay.num_targets = new_count;
-
 	if (new_count == 0) {
 		LOG_INF("OTA: Last target removed, session ended");
 		ota_relay.active = false;
@@ -263,6 +280,60 @@ static void remove_target(uint8_t tracker_id)
 	}
 }
 
+static bool ota_abort_pending(uint8_t tracker_id)
+{
+	if (tracker_id >= MAX_TRACKERS) {
+		return false;
+	}
+	unsigned int key = irq_lock();
+	bool valid = ota_abort_valid[tracker_id];
+	uint32_t expiry = ota_abort_expiry_ticks[tracker_id];
+	uint32_t now = k_uptime_ticks();
+	if (valid && (int32_t)(expiry - now) <= 0) {
+		ota_abort_valid[tracker_id] = false;
+		valid = false;
+	}
+	irq_unlock(key);
+	return valid;
+}
+
+bool esb_ota_relay_abort_pending(uint8_t tracker_id)
+{
+	return ota_abort_pending(tracker_id);
+}
+
+static void queue_abort(uint8_t tracker_id)
+{
+	if (tracker_id >= MAX_TRACKERS) {
+		return;
+	}
+	unsigned int key = irq_lock();
+	ota_abort_expiry_ticks[tracker_id] = k_uptime_ticks() + OTA_ABORT_TOMBSTONE_TICKS;
+	ota_abort_valid[tracker_id] = true;
+	irq_unlock(key);
+	esb_send_remote_command(tracker_id, ESB_PONG_FLAG_OTA_ABORT);
+}
+
+static void cancel_target(uint8_t tracker_id)
+{
+	if (tracker_id >= MAX_TRACKERS) {
+		return;
+	}
+	queue_abort(tracker_id);
+	if (ota_relay.tracker[tracker_id].participating) {
+		remove_target(tracker_id);
+	}
+}
+
+static void cancel_all_targets(void)
+{
+	uint8_t targets[OTA_MAX_PARALLEL];
+	uint8_t count = ota_relay.num_targets;
+	memcpy(targets, ota_relay.target_ids, count);
+	for (uint8_t i = 0; i < count; i++) {
+		cancel_target(targets[i]);
+	}
+}
 /* ── HID OUT Report Processing (Thread Context) ─────────────────── */
 
 void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
@@ -303,10 +374,17 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 			t->last_hid_forward_time = 0;
 			/* Skip parallel limit check — already counted */
 		} else if (ota_relay.num_targets >= OTA_MAX_PARALLEL) {
+
 			/* Check parallel limit for NEW trackers only */
 			LOG_ERR("OTA: Max parallel targets (%d) reached", OTA_MAX_PARALLEL);
 			break;
 		}
+		/* An accepted BEGIN starts a new command epoch for this tracker. */
+		unsigned int begin_key = irq_lock();
+		ota_abort_expiry_ticks[tracker_id] = 0;
+		ota_abort_valid[tracker_id] = false;
+		esb_clear_remote_ota_abort(tracker_id);
+		irq_unlock(begin_key);
 
 		uint32_t image_size = sys_get_le32(&data[2]);
 		uint32_t image_crc32 = sys_get_le32(&data[6]);
@@ -487,19 +565,12 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 	case HID_OTA_ABORT: {
 		uint8_t tracker_id = data[1];
 		LOG_WRN("OTA: Abort requested for tracker %u", tracker_id);
-
 		if (tracker_id == 0xFF) {
-			/* Abort all targets */
-			for (uint8_t i = 0; i < ota_relay.num_targets; i++) {
-				esb_send_remote_command(ota_relay.target_ids[i],
-							ESB_PONG_FLAG_OTA_ABORT);
-			}
+			cancel_all_targets();
 			reset_session();
 			unsuppress_all_trackers();
-		} else if (tracker_id < MAX_TRACKERS &&
-			   ota_relay.tracker[tracker_id].participating) {
-			esb_send_remote_command(tracker_id, ESB_PONG_FLAG_OTA_ABORT);
-			remove_target(tracker_id);
+		} else if (tracker_id < MAX_TRACKERS) {
+			cancel_target(tracker_id);
 		}
 		break;
 	}
@@ -512,12 +583,32 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 /* ── ESB ACK Payload Fill (Radio ISR Context) ────────────────────── */
 
 void esb_ota_relay_fill_ack(uint8_t tracker_id, uint32_t pipe_id,
-			    struct esb_payload *ack_payload, bool *has_ack,
-			    const uint8_t *rx_data, uint8_t rx_len)
+				    struct esb_payload *ack_payload, bool *has_ack,
+				    const uint8_t *rx_data, uint8_t rx_len)
 {
 	*has_ack = false;
 
-	if (!ota_relay.active || tracker_id >= MAX_TRACKERS) {
+	if (tracker_id >= MAX_TRACKERS) {
+		return;
+	}
+
+	/* Tombstones live outside session state and therefore survive removal. */
+	if (ota_abort_pending(tracker_id)) {
+		ack_payload->pipe = pipe_id;
+		ack_payload->length = ESB_PONG_LEN;
+		ack_payload->noack = false;
+		memset(ack_payload->data, 0, ESB_PONG_LEN);
+		ack_payload->data[0] = ESB_PONG_TYPE;
+		ack_payload->data[1] = tracker_id;
+		/* A legacy staged-OTA tracker may also parse this as a clock PONG. */
+		sys_put_be32((uint32_t)k_uptime_ticks(), &ack_payload->data[3]);
+		ack_payload->data[7] = ESB_PONG_FLAG_OTA_ABORT;
+		ack_payload->data[ESB_PONG_LEN - 1] = ota_crc8(ack_payload->data, ESB_PONG_LEN - 1);
+		*has_ack = true;
+		return;
+	}
+
+	if (!ota_relay.active) {
 		return;
 	}
 
@@ -532,9 +623,8 @@ void esb_ota_relay_fill_ack(uint8_t tracker_id, uint32_t pipe_id,
 	 * This prevents silent loss when a single ACK is missed.
 	 *
 	 * Exception: VERIFY/ACTIVATE must NOT block DATA delivery.
-	 * The RAM engine only processes DATA packets (type 0x20) and
-	 * ignores all other types.  If VERIFY is sent while the tracker
-	 * still needs DATA, the tracker never receives it → deadlock.
+		 * Older RAM engines only process DATA packets (type 0x20) while
+		 * receiving. If VERIFY replaces required DATA, the tracker stalls.
 	 * Defer VERIFY/ACTIVATE when the ring has data for this tracker. */
 	if (t->pending_cmd_type != 0) {
 		/* Timeout: stop retrying after 10 seconds */
@@ -745,24 +835,19 @@ void esb_ota_relay_process_tracker_packet(const uint8_t *data, size_t len)
 void esb_ota_relay_console_cmd(uint8_t tracker_id, const char *cmd)
 {
 	if (strcmp(cmd, "info") == 0 || strcmp(cmd, "query") == 0) {
-		LOG_INF("OTA: Requesting firmware info from tracker %u", tracker_id);
-		esb_send_remote_command(tracker_id, ESB_PONG_FLAG_OTA_QUERY_INFO);
+		if (tracker_id < MAX_TRACKERS) {
+			LOG_INF("OTA: Requesting firmware info from tracker %u", tracker_id);
+			esb_send_remote_command(tracker_id, ESB_PONG_FLAG_OTA_QUERY_INFO);
+		}
 	} else if (strcmp(cmd, "abort") == 0 || strcmp(cmd, "cancel") == 0) {
 		if (tracker_id == 0xFF) {
-			/* Abort all targets */
 			LOG_WRN("OTA: Aborting all targets");
-			for (uint8_t i = 0; i < ota_relay.num_targets; i++) {
-				esb_send_remote_command(ota_relay.target_ids[i],
-							ESB_PONG_FLAG_OTA_ABORT);
-			}
+			cancel_all_targets();
 			reset_session();
 			unsuppress_all_trackers();
-		} else {
+		} else if (tracker_id < MAX_TRACKERS) {
 			LOG_WRN("OTA: Sending abort to tracker %u", tracker_id);
-			esb_send_remote_command(tracker_id, ESB_PONG_FLAG_OTA_ABORT);
-			if (ota_relay.tracker[tracker_id].participating) {
-				remove_target(tracker_id);
-			}
+			cancel_target(tracker_id);
 		}
 	} else if (strcmp(cmd, "status") == 0) {
 		if (ota_relay.active) {

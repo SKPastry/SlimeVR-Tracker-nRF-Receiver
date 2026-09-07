@@ -1635,6 +1635,11 @@ static void esb_ack_handler_cb(
 			cmd = ESB_PONG_FLAG_OTA_SUPPRESS;
 		}
 
+		bool ota_aborting = esb_ota_relay_abort_pending(tracker_id);
+		if (ota_aborting) {
+			cmd = ESB_PONG_FLAG_OTA_ABORT;
+		}
+
 		ack_payload->pipe = 1 + (tracker_id % 7);
 		ack_payload->length = ESB_PONG_LEN;
 		ack_payload->noack = false;
@@ -1710,9 +1715,14 @@ static void esb_ack_handler_cb(
 		ack_payload->data[ESB_PONG_LEN - 1] = crc8_ccitt(0x07, ack_payload->data, ESB_PONG_LEN - 1);
 		*has_ack_payload = true;
 
+		/* Preserve the ordinary PONG counter and clock stamp on cancellation. */
+		if (ota_aborting) {
+			return;
+		}
+
 		/* If OTA session has a pending command for this tracker
-		 * (e.g., BEGIN before tracker enters OTA mode), override
-		 * the standard PONG with the OTA payload. */
+		 * (e.g., BEGIN before tracker enters OTA mode), override the
+		 * standard PONG with the OTA payload. */
 		if (esb_ota_relay_is_active() && esb_ota_relay_is_target(tracker_id)) {
 			bool ota_has_ack = false;
 			esb_ota_relay_fill_ack(tracker_id, pipe_id, ack_payload, &ota_has_ack, NULL, 0);
@@ -3300,6 +3310,17 @@ bool esb_request_metadata(uint8_t tracker_id, uint8_t mask, uint8_t chunk)
 	LOG_INF("Queued metadata request tracker=%u mask=0x%02X chunk=%u token=%u", tracker_id, mask, chunk,
 		token);
 	return true;
+}
+void esb_clear_remote_ota_abort(uint8_t tracker_id)
+{
+	if (tracker_id >= MAX_TRACKERS) {
+		return;
+	}
+	unsigned int key = irq_lock();
+	if (tracker_remote_command[tracker_id] == ESB_PONG_FLAG_OTA_ABORT) {
+		tracker_remote_command[tracker_id] = ESB_PONG_FLAG_NORMAL;
+	}
+	irq_unlock(key);
 }
 
 // Send remote command to specified tracker
