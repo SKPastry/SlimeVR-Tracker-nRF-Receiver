@@ -336,7 +336,13 @@ uint8_t rcv_cmd_collect_batch_stop(void)
 	return RCV_HID_ST_OK;
 #endif
 }
-
+uint8_t rcv_cmd_collect_meta(uint8_t tracker_id, uint8_t mask, uint8_t chunk)
+{
+	if (tracker_id >= MAX_TRACKERS || mask == 0 || (mask & ~ESB_METADATA_MASK_VALID) != 0) {
+		return RCV_HID_ST_EINVAL;
+	}
+	return esb_request_metadata(tracker_id, mask, chunk) ? RCV_HID_ST_QUEUED : RCV_HID_ST_ENOENT;
+}
 uint8_t rcv_cmd_reboot(void)
 {
 	schedule_reset(PENDING_RESET_REBOOT);
@@ -913,6 +919,13 @@ bool rcv_cmd_process_hid(const uint8_t *buf, size_t len, uint8_t ack_out[RCV_HID
 				status = RCV_HID_ST_EINVAL;
 			} else {
 				status = rcv_cmd_collect_batch_start(sys_get_le16(args));
+			}
+			break;
+		case RCV_HID_OP_COLLECT_META:
+			if (args_len < 3) {
+				status = RCV_HID_ST_EINVAL;
+			} else {
+				status = rcv_cmd_collect_meta(args[0], args[1], args[2]);
 			}
 			break;
 		case RCV_HID_OP_COLLECT_BATCH_STOP:

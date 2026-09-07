@@ -174,6 +174,16 @@ static volatile uint16_t tracker_test_on_tps[MAX_TRACKERS];   // Optional TPS ca
 static volatile int16_t pending_sens_data[MAX_TRACKERS][3];   // SENS_SET sensitivity data
 static volatile uint8_t pending_sens_auto_axis[MAX_TRACKERS];
 static volatile uint16_t pending_sens_auto_revolutions[MAX_TRACKERS];
+/* Metadata repair requests are lower priority than any existing PONG command.
+ * Active and queued request fields are separate so a retry gets a fresh token
+ * without replacing collection/control commands already in flight. */
+static volatile uint8_t metadata_active_mask[MAX_TRACKERS];
+static volatile uint8_t metadata_active_chunk[MAX_TRACKERS];
+static volatile uint16_t metadata_active_token[MAX_TRACKERS];
+static volatile uint8_t metadata_pending_mask[MAX_TRACKERS];
+static volatile uint8_t metadata_pending_chunk[MAX_TRACKERS];
+static volatile uint16_t metadata_pending_token[MAX_TRACKERS];
+static uint16_t metadata_next_token;
 /* Sticky state for commands addressed to "all": newly active trackers must
  * converge to the same test on/off state. Confirmed means the tracker has
  * executed and acknowledged the current desired state. */
@@ -530,6 +540,11 @@ static void tdma_recalculate(void)
 		tdma_loss_trigger_streak = 0;
 		tdma_loss_recover_streak = 0;
 	}
+	if (!mask_changed && (data_collect_is_active() || data_collect_batch_is_active())) {
+		/* Also cancel a deferred ladder step if collection started after
+		 * the loss tick. Genuine membership changes still reconfigure. */
+		tdma_cap_level = tdma_published_cap_level;
+	}
 	uint8_t slot_ticks = tdma_slot_ticks_for(active_count);
 	bool test_all_layout = atomic_get(&test_all_enabled) != 0;
 
@@ -782,11 +797,10 @@ static void tdma_sync_stats_reset(void)
 }
 
 /* Aggregate loss ladder controller. Runs once per 1 s stats tick, before
- * tdma_recalculate(). Metric: sequence-gap share of received+gaps over all
- * active trackers — a CRC-destroyed packet also surfaces as a sequence gap,
- * so this is end-to-end data loss. A sustained >5% window steps the cap down
- * one ladder level; 30 s of <1% steps back up. tdma_recalculate() owns the
- * reconfiguration debounce and publication. */
+ * tdma_recalculate(). Metric: normal/composite sequence-gap share of
+ * received+gaps over active trackers, not the independent raw capture stream.
+ * A sustained >5% window steps the cap down one ladder level; 30 s of <1%
+ * steps back up. tdma_recalculate() owns debounce and publication. */
 static void tdma_loss_controller_tick(int64_t now)
 {
 	ARG_UNUSED(now);
@@ -816,7 +830,13 @@ static void tdma_loss_controller_tick(int64_t now)
 
 	/* Always advance snapshots above. Otherwise leaving an excluded mode would
 	 * collapse its entire accumulated traffic into one fake 1 s loss window. */
-	if (data_collect_is_active() || esb_ota_relay_is_active()
+	bool collecting = data_collect_is_active() || data_collect_batch_is_active();
+	if (collecting) {
+		/* Batch fusion traffic is throttled to 10 TPS; it must not drive
+		 * a layout change underneath the independent raw stream. */
+		tdma_cap_level = tdma_published_cap_level;
+	}
+	if (collecting || esb_ota_relay_is_active()
 	    || (atomic_get(&test_all_state_valid) && atomic_get(&test_all_enabled))) {
 		tdma_loss_trigger_streak = 0;
 		tdma_loss_recover_streak = 0;
@@ -1582,11 +1602,22 @@ static void esb_ack_handler_cb(
 		if (pdu_data[ESB_PING_LEN - 1] != crc) {
 			return;
 		}
-
 		uint8_t counter = pdu_data[2];
-		uint8_t cmd = tracker_remote_command[tracker_id];
-
 		uint32_t rx_ticks = k_uptime_ticks();
+		uint8_t cmd = tracker_remote_command[tracker_id];
+		/* Keep an active metadata request on duplicate PINGs until its echo
+		 * arrives; publish pending tuple atomically against the radio ISR. */
+		unsigned int metadata_key = irq_lock();
+		if (cmd == ESB_PONG_FLAG_NORMAL && metadata_active_mask[tracker_id] != 0) {
+			cmd = ESB_PONG_FLAG_METADATA_REQUEST;
+		} else if (cmd == ESB_PONG_FLAG_NORMAL && metadata_pending_mask[tracker_id] != 0) {
+			metadata_active_mask[tracker_id] = metadata_pending_mask[tracker_id];
+			metadata_active_chunk[tracker_id] = metadata_pending_chunk[tracker_id];
+			metadata_active_token[tracker_id] = metadata_pending_token[tracker_id];
+			metadata_pending_mask[tracker_id] = 0;
+			cmd = ESB_PONG_FLAG_METADATA_REQUEST;
+		}
+		irq_unlock(metadata_key);
 		/* Save accurate RADIO ISR timestamp for clock_bias computation in event_handler */
 		g_ping_isr_rx_ticks[tracker_id] = rx_ticks;
 		g_ping_isr_rx_ticks_valid[tracker_id] = true;
@@ -1653,7 +1684,12 @@ static void esb_ack_handler_cb(
 				ack_payload->data[8] = (tracker_test_on_tps[tracker_id] >> 8) & 0xFF;
 				ack_payload->data[9] = tracker_test_on_tps[tracker_id] & 0xFF;
 				ack_payload->data[10] = 0;
-				ack_payload->data[11] = 0;
+			} else if (cmd == ESB_PONG_FLAG_METADATA_REQUEST) {
+				ack_payload->data[8] = metadata_active_mask[tracker_id];
+				ack_payload->data[9] = metadata_active_chunk[tracker_id];
+				uint16_t token = metadata_active_token[tracker_id];
+				ack_payload->data[10] = (token >> 8) & 0xFF;
+				ack_payload->data[11] = token & 0xFF;
 			} else if (cmd == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
 				ack_payload->data[8] = pending_cmd_arg[tracker_id];
 				ack_payload->data[9] = 0;
@@ -2167,6 +2203,17 @@ void event_handler(struct esb_evt const *event)
 						}
 					} // End of else branch for ping_counter_initialized
 
+					if (ping_ack_flag == ESB_PONG_FLAG_METADATA_REQUEST) {
+						uint16_t echoed_token = ((uint16_t)rx_payload.data[10] << 8) | rx_payload.data[11];
+						bool metadata_matches = metadata_active_mask[tracker_id] != 0 &&
+							rx_payload.data[8] == metadata_active_mask[tracker_id] &&
+							rx_payload.data[9] == metadata_active_chunk[tracker_id] &&
+							echoed_token == metadata_active_token[tracker_id];
+						if (metadata_matches) {
+							metadata_active_mask[tracker_id] = 0;
+							LOG_DBG("Tracker %u confirmed metadata token=%u", tracker_id, echoed_token);
+						}
+					}
 					if (ping_ack_flag != ESB_PONG_FLAG_NORMAL) {
 						uint16_t ping_ack_tps = ping_ack_flag == ESB_PONG_FLAG_TEST_MODE_ON
 							? ((uint16_t)rx_payload.data[8] << 8) | rx_payload.data[9] : 0;
@@ -3214,6 +3261,8 @@ static const char *esb_pong_flag_name(uint8_t flag)
 		return "DATA_COLLECT_BATCH_ON";
 	case ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF:
 		return "DATA_COLLECT_BATCH_OFF";
+	case ESB_PONG_FLAG_METADATA_REQUEST:
+		return "METADATA_REQUEST";
 	case ESB_PONG_FLAG_OTA_QUERY_INFO:
 		return "OTA_QUERY_INFO";
 	case ESB_PONG_FLAG_OTA_ABORT:
@@ -3225,6 +3274,32 @@ static const char *esb_pong_flag_name(uint8_t flag)
 	default:
 		return "UNKNOWN";
 	}
+}
+
+bool esb_request_metadata(uint8_t tracker_id, uint8_t mask, uint8_t chunk)
+{
+	if (tracker_id >= MAX_TRACKERS || mask == 0 || (mask & ~ESB_METADATA_MASK_VALID) != 0) {
+		return false;
+	}
+	int64_t now = k_uptime_get();
+	if (tracker_id >= stored_trackers || stored_tracker_addr[tracker_id] == 0 ||
+	    tracker_stats[tracker_id].last_packet_time == 0 ||
+	    now - tracker_stats[tracker_id].last_packet_time > PING_TIMEOUT_MS) {
+		return false;
+	}
+	unsigned int key = irq_lock();
+	metadata_next_token++;
+	if (metadata_next_token == 0) {
+		metadata_next_token = 1;
+	}
+	metadata_pending_token[tracker_id] = metadata_next_token;
+	metadata_pending_mask[tracker_id] = mask;
+	metadata_pending_chunk[tracker_id] = chunk;
+	uint16_t token = metadata_next_token;
+	irq_unlock(key);
+	LOG_INF("Queued metadata request tracker=%u mask=0x%02X chunk=%u token=%u", tracker_id, mask, chunk,
+		token);
+	return true;
 }
 
 // Send remote command to specified tracker

@@ -97,9 +97,11 @@ static inline uint8_t esb_rf_channel_decode(uint8_t stored)
 #define ESB_PONG_FLAG_DFU_OTA 0x21          // Enter OTA DFU bootloader
 #define ESB_PONG_FLAG_DATA_COLLECT_ON 0x22  // Start raw data collection
 #define ESB_PONG_FLAG_DATA_COLLECT_OFF 0x23 // Stop raw data collection
+#define ESB_PONG_FLAG_SENS_AUTO 0x24        // Auto-calibrate gyro sensitivity
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON 0x34  // Start batch raw data collection (data[8] = target Hz)
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF 0x35 // Stop batch raw data collection
-#define ESB_PONG_FLAG_SENS_AUTO 0x24        // Auto-calibrate gyro sensitivity
+#define ESB_PONG_FLAG_METADATA_REQUEST 0x36 // Request selected metadata section/chunk
+#define ESB_METADATA_MASK_VALID 0x3F
 #define ESB_PONG_FLAG_MAG_AUTO_ON 0x25      // Enable online magnetometer calibration
 #define ESB_PONG_FLAG_MAG_AUTO_OFF 0x26     // Disable online magnetometer calibration
 #define ESB_PONG_FLAG_OTA_QUERY_INFO 0x30   // Request firmware info for ESB OTA
@@ -170,6 +172,9 @@ void esb_send_remote_command_sens(uint8_t tracker_id, float x, float y, float z)
 bool esb_send_remote_command_sens_auto(uint8_t tracker_id, uint8_t axis, uint16_t revolutions);
 /* Active-scan then queue. Returns bitmask of targeted tracker ids. Blocks ~1s. */
 uint32_t esb_send_remote_command_sens_auto_all(uint8_t axis, uint16_t revolutions);
+/* Queue a metadata repair request without replacing an existing control flag.
+ * mask selects metadata sections; chunk selects a dense tcal block (0..254) or all (255). */
+bool esb_request_metadata(uint8_t tracker_id, uint8_t mask, uint8_t chunk);
 /* Returns 0 if started, -EINVAL bad channel, -EBUSY if another change pending. */
 int esb_set_all_trackers_channel(uint8_t channel);
 int esb_clear_all_trackers_channel(void);

@@ -166,6 +166,7 @@ static void print_help(void)
 		"Other:\n"
 		"  collect <id>               Start raw sensor data collection from tracker\n"
 		"  collectall <rate_hz>       Start batch raw data collection from all paired trackers\n"
+		"  collectmeta <id> <mask> <chunk>  Request metadata sections (mask 0x01-0x3f, chunk 0-255)\n"
 		"  collect off                Stop data collection\n"
 		"  collectstop                Stop batch data collection\n"
 		"  collect                    Show data collection status\n"
@@ -274,6 +275,7 @@ static void console_thread(void)
 	const char command_collectall[] = "collectall";
 	const char command_collectstop[] = "collectstop";
 	const char command_collect[] = "collect";
+	const char command_collectmeta[] = "collectmeta";
 	const char command_ota[] = "ota";
 
 	while (1) {
@@ -432,7 +434,16 @@ static void console_thread(void)
 			}
 		}
 #endif
-		else if (strcmp(argv[0], command_collectall) == 0) {
+		else if (strcmp(argv[0], command_collectmeta) == 0) {
+			uint8_t id, mask, chunk;
+			if (argc != 4 || !parse_u8_arg(arg, &id) || !parse_u8_arg(arg2, &mask) ||
+			    !parse_u8_arg(arg3, &chunk) || mask == 0 || (mask & ~ESB_METADATA_MASK_VALID) != 0) {
+				printk("Usage: collectmeta <tracker_id> <mask 1-63> <chunk 0-255>\n");
+			} else {
+				uint8_t st = rcv_cmd_collect_meta(id, mask, chunk);
+				printk("collectmeta tracker=%u mask=0x%02x chunk=%u status=%u\n", id, mask, chunk, st);
+			}
+		} else if (strcmp(argv[0], command_collectall) == 0) {
 #ifdef CONFIG_DATA_COLLECT
 			uint8_t rate;
 			if (!arg || !parse_u8_arg(arg, &rate)) {
