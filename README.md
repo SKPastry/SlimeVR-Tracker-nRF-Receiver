@@ -1,7 +1,24 @@
-# Receiver firmware for SlimeNRF
-Firmware for Nordic nRF52833 / nRF52840 SoC.
+# SlimeNRF receiver firmware
 
-Please see https://docs.slimevr.dev/smol-slimes for more information and usage.
+Zephyr/NCS firmware for SlimeNRF receivers on Nordic nRF52833 and nRF52840 SoCs.
+
+## Project history
+
+This firmware is originally based on [SlimeVR/SlimeVR-Tracker-nRF-Receiver](https://github.com/SlimeVR/SlimeVR-Tracker-nRF-Receiver). Thanks to the upstream contributors for their work.
+
+This fork continues development alongside our [tracker firmware](https://github.com/jitingcn/SlimeVR-Tracker-nRF), with changes driven by real players and community needs.
+
+## Major differences from upstream
+
+- Remote tracker commands through the receiver console and USB HID
+- Different TDMA radio scheduling, adaptive rate control, and clock synchronization
+- ESB OTA updates for trackers and receiver self-update support
+- Single-tracker and batch raw sensor collection over USB HID or CDC
+- On-demand repair of missing collection metadata and calibration tables
+- Python tools for data collection, remote commands, and OTA updates
+- Optional per-tracker radio and clock-sync diagnostics
+
+Use matching tracker, receiver, and host-tool versions for fork-specific features.
 
 ## Raw collection metadata
 
