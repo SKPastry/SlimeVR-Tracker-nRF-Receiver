@@ -310,10 +310,11 @@ static void send_report(struct k_work *work)
 	if (!receiver_usb_is_enabled()) return;
 	if (!receiver_usb_is_configured()) return;
 	if (!hid_ready) return;
-	if (!stored_trackers) return;
 
-	if (hid_fifo_is_empty() && k_uptime_get() - 100 < last_registration_sent) {
-		return; // send registrations only every 100ms
+	uint8_t tracker_count = stored_trackers;
+	bool fifo_empty = hid_fifo_is_empty();
+	if (fifo_empty && (tracker_count == 0 || k_uptime_get() - 100 < last_registration_sent)) {
+		return; // send registrations only every 100ms when trackers are stored
 	}
 
 	int ret;
@@ -323,9 +324,13 @@ static void send_report(struct k_work *work)
 
 		int epind = (int)reports_to_send;
 		for (; epind < HID_EP_REPORT_COUNT; epind++) {
-			if (stored_trackers > 0) {
+			if (tracker_count > 0) {
 				packet_device_addr(ep_report_buffer[epind].data, sent_device_addr);
-				sent_device_addr = (sent_device_addr + 1) % stored_trackers;
+				sent_device_addr = (sent_device_addr + 1) % tracker_count;
+			} else {
+				/* Use an unassigned type so hosts ignore empty slots, with no stale bytes. */
+				memset(ep_report_buffer[epind].data, 0, sizeof(ep_report_buffer[epind].data));
+				ep_report_buffer[epind].data[0] = 0xF8;
 			}
 		}
 
