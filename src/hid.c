@@ -291,16 +291,30 @@ static uint32_t dropped_reports = 0;
 static uint16_t max_dropped_reports = 0;
 /* Per-tracker drop counters; printed from logging thread when detailed stats on. */
 static uint32_t tracker_drops[MAX_TRACKERS] = {0};
+static uint32_t total_dropped_reports = 0;
+static uint32_t total_tracker_drops[MAX_TRACKERS] = {0};
+
+uint32_t hid_get_total_drop_count(void)
+{
+	return total_dropped_reports;
+}
+
+uint32_t hid_get_total_tracker_drop_count(uint8_t tracker_id)
+{
+	return tracker_id < MAX_TRACKERS ? total_tracker_drops[tracker_id] : 0;
+}
+
 
 static void send_report(struct k_work *work)
 {
 	if (!receiver_usb_is_enabled()) return;
 	if (!receiver_usb_is_configured()) return;
 	if (!hid_ready) return;
-	if (!stored_trackers) return;
 
-	if (hid_fifo_is_empty() && k_uptime_get() - 100 < last_registration_sent) {
-		return; // send registrations only every 100ms
+	uint8_t tracker_count = stored_trackers;
+	bool fifo_empty = hid_fifo_is_empty();
+	if (fifo_empty && (tracker_count == 0 || k_uptime_get() - 100 < last_registration_sent)) {
+		return; // send registrations only every 100ms when trackers are stored
 	}
 
 	int ret;
@@ -310,9 +324,13 @@ static void send_report(struct k_work *work)
 
 		int epind = (int)reports_to_send;
 		for (; epind < HID_EP_REPORT_COUNT; epind++) {
-			if (stored_trackers > 0) {
+			if (tracker_count > 0) {
 				packet_device_addr(ep_report_buffer[epind].data, sent_device_addr);
-				sent_device_addr = (sent_device_addr + 1) % stored_trackers;
+				sent_device_addr = (sent_device_addr + 1) % tracker_count;
+			} else {
+				/* Use an unassigned type so hosts ignore empty slots, with no stale bytes. */
+				memset(ep_report_buffer[epind].data, 0, sizeof(ep_report_buffer[epind].data));
+				ep_report_buffer[epind].data[0] = 0xF8;
 			}
 		}
 
@@ -743,6 +761,7 @@ void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
 	}
 
 	/* Count only — LOG from hid_dropped_reports_logging thread, never EVENT IRQ. */
+	total_dropped_reports++;
 	dropped_reports++;
 	if (dropped_reports > max_dropped_reports) {
 		max_dropped_reports = dropped_reports;
@@ -751,6 +770,7 @@ void hid_write_packet_n(const uint8_t *data, uint8_t rssi)
 		uint8_t tracker_id = data[1];
 		if (tracker_id < MAX_TRACKERS) {
 			tracker_drops[tracker_id]++;
+			total_tracker_drops[tracker_id]++;
 		}
 	}
 }

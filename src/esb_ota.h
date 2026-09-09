@@ -102,6 +102,9 @@ bool esb_ota_relay_is_target(uint8_t tracker_id);
  */
 uint8_t esb_ota_relay_get_num_targets(void);
 
+/** Return true while an OTA abort tombstone remains active for a tracker. */
+bool esb_ota_relay_abort_pending(uint8_t tracker_id);
+
 /**
  * Process a HID OUT report that may contain an OTA command.
  * Called from HID read work handler (thread context).

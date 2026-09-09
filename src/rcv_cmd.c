@@ -8,6 +8,7 @@
 #include "connection/esb.h"
 #include "connection/rssi_scan.h"
 #include "data_collect.h"
+#include "esb_ota.h"
 #include "globals.h"
 #include "system/system.h"
 
@@ -243,6 +244,20 @@ uint8_t rcv_cmd_collect_start(uint8_t tracker_id)
 	if (tracker_id >= MAX_TRACKERS) {
 		return RCV_HID_ST_EINVAL;
 	}
+	if (data_collect_batch_is_active()) {
+		uint32_t mask = 0;
+		for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+			if (data_collect_batch_is_target(i)) {
+				mask |= BIT(i);
+			}
+		}
+		data_collect_batch_stop();
+		for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+			if (mask & BIT(i)) {
+				esb_send_remote_command(i, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF);
+			}
+		}
+	}
 	data_collect_start(tracker_id);
 	esb_send_remote_command(tracker_id, ESB_PONG_FLAG_DATA_COLLECT_ON);
 	return RCV_HID_ST_OK;
@@ -263,6 +278,71 @@ uint8_t rcv_cmd_collect_stop(void)
 #endif
 }
 
+uint8_t rcv_cmd_collect_batch_start(uint16_t rate_hz)
+{
+#ifndef CONFIG_DATA_COLLECT
+	ARG_UNUSED(rate_hz);
+	return RCV_HID_ST_ENOTSUP;
+#else
+	if (rate_hz > UINT8_MAX) {
+		return RCV_HID_ST_EINVAL;
+	}
+	if (esb_ota_relay_is_active()) {
+		return RCV_HID_ST_EBUSY;
+	}
+	if (data_collect_is_active()) {
+		uint8_t tid = data_collect_get_target_id();
+		data_collect_stop();
+		esb_send_remote_command(tid, ESB_PONG_FLAG_DATA_COLLECT_OFF);
+	}
+	uint32_t mask = 0;
+	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
+		if (stored_tracker_addr[i] != 0) {
+			mask |= BIT(i);
+		}
+	}
+	if (mask == 0) {
+		return RCV_HID_ST_ENOENT;
+	}
+	data_collect_batch_start(mask, rate_hz);
+	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+		if (mask & BIT(i)) {
+			esb_send_remote_command_arg(i, ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, (uint8_t)rate_hz);
+		}
+	}
+	return RCV_HID_ST_OK;
+#endif
+}
+
+uint8_t rcv_cmd_collect_batch_stop(void)
+{
+#ifndef CONFIG_DATA_COLLECT
+	return RCV_HID_ST_ENOTSUP;
+#else
+	if (data_collect_batch_is_active()) {
+		uint32_t mask = 0;
+		for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+			if (data_collect_batch_is_target(i)) {
+				mask |= BIT(i);
+			}
+		}
+		data_collect_batch_stop();
+		for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+			if (mask & BIT(i)) {
+				esb_send_remote_command(i, ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF);
+			}
+		}
+	}
+	return RCV_HID_ST_OK;
+#endif
+}
+uint8_t rcv_cmd_collect_meta(uint8_t tracker_id, uint8_t mask, uint8_t chunk)
+{
+	if (tracker_id >= MAX_TRACKERS || mask == 0 || (mask & ~ESB_METADATA_MASK_VALID) != 0) {
+		return RCV_HID_ST_EINVAL;
+	}
+	return esb_request_metadata(tracker_id, mask, chunk) ? RCV_HID_ST_QUEUED : RCV_HID_ST_ENOENT;
+}
 uint8_t rcv_cmd_reboot(void)
 {
 	schedule_reset(PENDING_RESET_REBOOT);
@@ -296,15 +376,20 @@ enum remote_hid_job {
 	REMOTE_HID_JOB_NONE = 0,
 	REMOTE_HID_JOB_FLAG_ALL,
 	REMOTE_HID_JOB_SENS_AUTO_ALL,
+	REMOTE_HID_JOB_TEST_ON_ALL,
+	REMOTE_HID_JOB_TEST_OFF_ALL,
 };
 
 static enum remote_hid_job remote_hid_job;
 static uint8_t remote_hid_job_flag;
 static uint8_t remote_hid_job_axis;
 static uint16_t remote_hid_job_rev;
+static uint16_t remote_hid_job_tps;
 
 static void remote_hid_timeout_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(remote_hid_timeout_work, remote_hid_timeout_handler);
+/* Runs on rssi_wq: the ~1s active-scan inside all-target jobs must not stall
+ * the system workqueue; the single-threaded queue serializes jobs and scans. */
 static void remote_hid_job_handler(struct k_work *work);
 static K_WORK_DEFINE(remote_hid_job_work, remote_hid_job_handler);
 
@@ -376,6 +461,12 @@ static void remote_hid_job_handler(struct k_work *work)
 	case REMOTE_HID_JOB_SENS_AUTO_ALL:
 		mask = esb_send_remote_command_sens_auto_all(remote_hid_job_axis, remote_hid_job_rev);
 		break;
+	case REMOTE_HID_JOB_TEST_ON_ALL:
+		mask = esb_send_remote_command_test_on_all(remote_hid_job_tps);
+		break;
+	case REMOTE_HID_JOB_TEST_OFF_ALL:
+		mask = esb_send_remote_command_test_off_all();
+		break;
 	default:
 		remote_hid_finish(RCV_HID_ST_EINVAL);
 		return;
@@ -433,7 +524,7 @@ static uint8_t rcv_cmd_remote_flag_hid(uint8_t seq, uint8_t opcode, uint8_t targ
 		/* Defer 1s active-scan so HID IN FIFO keeps draining. */
 		remote_hid_job = REMOTE_HID_JOB_FLAG_ALL;
 		remote_hid_job_flag = pong_flag;
-		k_work_submit(&remote_hid_job_work);
+		k_work_submit_to_queue(&rssi_wq, &remote_hid_job_work);
 		return RCV_HID_ST_STARTED;
 	}
 	if (target_id >= MAX_TRACKERS) {
@@ -494,7 +585,7 @@ static uint8_t rcv_cmd_remote_sens_auto_hid(uint8_t seq, uint8_t opcode, uint8_t
 		remote_hid_job = REMOTE_HID_JOB_SENS_AUTO_ALL;
 		remote_hid_job_axis = axis;
 		remote_hid_job_rev = revolutions;
-		k_work_submit(&remote_hid_job_work);
+		k_work_submit_to_queue(&rssi_wq, &remote_hid_job_work);
 		return RCV_HID_ST_STARTED;
 	}
 	if (target_id >= MAX_TRACKERS) {
@@ -506,6 +597,52 @@ static uint8_t rcv_cmd_remote_sens_auto_hid(uint8_t seq, uint8_t opcode, uint8_t
 		remote_hid_abort();
 		return RCV_HID_ST_EINVAL;
 	}
+	return RCV_HID_ST_STARTED;
+}
+
+static uint8_t rcv_cmd_remote_test_on_hid(uint8_t seq, uint8_t opcode, uint8_t target_id, uint16_t tps)
+{
+	if (tps > 1000) {
+		return RCV_HID_ST_EINVAL;
+	}
+	uint8_t st = remote_hid_begin(seq, opcode, ESB_PONG_FLAG_TEST_MODE_ON);
+	if (st != RCV_HID_ST_STARTED) {
+		return st;
+	}
+	if (target_id == RCV_HID_TARGET_ALL) {
+		/* Defer 1s active-scan so HID IN FIFO keeps draining. */
+		remote_hid_job = REMOTE_HID_JOB_TEST_ON_ALL;
+		remote_hid_job_tps = tps;
+		k_work_submit_to_queue(&rssi_wq, &remote_hid_job_work);
+		return RCV_HID_ST_STARTED;
+	}
+	if (target_id >= MAX_TRACKERS) {
+		remote_hid_abort();
+		return RCV_HID_ST_EINVAL;
+	}
+	/* Arm before queue so a fast confirm cannot race expected==0. */
+	remote_hid_arm_expected(1u << target_id);
+	esb_send_remote_command_test_on((uint8_t)target_id, tps);
+	return RCV_HID_ST_STARTED;
+}
+
+static uint8_t rcv_cmd_remote_test_off_hid(uint8_t seq, uint8_t opcode, uint8_t target_id)
+{
+	uint8_t st = remote_hid_begin(seq, opcode, ESB_PONG_FLAG_TEST_MODE_OFF);
+	if (st != RCV_HID_ST_STARTED) {
+		return st;
+	}
+	if (target_id == RCV_HID_TARGET_ALL) {
+		remote_hid_job = REMOTE_HID_JOB_TEST_OFF_ALL;
+		k_work_submit_to_queue(&rssi_wq, &remote_hid_job_work);
+		return RCV_HID_ST_STARTED;
+	}
+	if (target_id >= MAX_TRACKERS) {
+		remote_hid_abort();
+		return RCV_HID_ST_EINVAL;
+	}
+	remote_hid_arm_expected(1u << target_id);
+	esb_send_remote_command_test_off((uint8_t)target_id);
 	return RCV_HID_ST_STARTED;
 }
 
@@ -554,11 +691,45 @@ uint8_t rcv_cmd_tracker_channel_clear_all(void)
 	return (uint8_t)map_esb_channel_err(esb_clear_all_trackers_channel());
 }
 
+uint8_t rcv_cmd_remote_test_on(uint8_t target_id, uint16_t tps)
+{
+	if (tps > 1000) {
+		return RCV_HID_ST_EINVAL;
+	}
+	if (target_id == RCV_HID_TARGET_ALL) {
+		uint32_t mask = esb_send_remote_command_test_on_all(tps);
+		return mask != 0 ? RCV_HID_ST_STARTED : RCV_HID_ST_ENOENT;
+	}
+	if (target_id >= MAX_TRACKERS) {
+		return RCV_HID_ST_EINVAL;
+	}
+	esb_send_remote_command_test_on((uint8_t)target_id, tps);
+	return RCV_HID_ST_OK;
+}
+
+uint8_t rcv_cmd_remote_test_off(uint8_t target_id)
+{
+	if (target_id == RCV_HID_TARGET_ALL) {
+		uint32_t mask = esb_send_remote_command_test_off_all();
+		return mask != 0 ? RCV_HID_ST_STARTED : RCV_HID_ST_ENOENT;
+	}
+	if (target_id >= MAX_TRACKERS) {
+		return RCV_HID_ST_EINVAL;
+	}
+	esb_send_remote_command_test_off((uint8_t)target_id);
+	return RCV_HID_ST_OK;
+}
+
 uint8_t rcv_cmd_remote_flag(uint8_t target_id, uint8_t pong_flag)
 {
 	/* Keep the private high ESB flag available to console without assigning a HID opcode. */
 	if (!rcv_hid_opcode_is_pong_flag(pong_flag) &&
 	    pong_flag != ESB_PONG_FLAG_TCAL_HEAT_START) {
+		return RCV_HID_ST_EINVAL;
+	}
+	if (pong_flag == ESB_PONG_FLAG_TEST_MODE_ON || pong_flag == ESB_PONG_FLAG_TEST_MODE_OFF) {
+		/* Test flags carry TPS state; the generic path would keep a stale
+		 * rate. Callers must use rcv_cmd_remote_test_on/off. */
 		return RCV_HID_ST_EINVAL;
 	}
 	if (target_id == RCV_HID_TARGET_ALL) {
@@ -662,6 +833,21 @@ bool rcv_cmd_process_hid(const uint8_t *buf, size_t len, uint8_t ack_out[RCV_HID
 				uint16_t rev = sys_get_le16(&args[2]);
 				status = rcv_cmd_remote_sens_auto_hid(seq, opcode, target, axis, rev);
 			}
+		} else if (opcode == ESB_PONG_FLAG_TEST_MODE_ON) {
+			/* args[0] target; optional little-endian uint16 TPS in args[1:3].
+			 * Absent (<=1 arg) = 0 (built-in default); truncated (2 args) is
+			 * rejected. */
+			uint16_t tps = 0;
+			if (args_len == 2) {
+				status = RCV_HID_ST_EINVAL;
+			} else {
+				if (args_len >= 3) {
+					tps = sys_get_le16(&args[1]);
+				}
+				status = rcv_cmd_remote_test_on_hid(seq, opcode, target, tps);
+			}
+		} else if (opcode == ESB_PONG_FLAG_TEST_MODE_OFF) {
+			status = rcv_cmd_remote_test_off_hid(seq, opcode, target);
 		} else if (opcode == ESB_PONG_FLAG_SET_CHANNEL ||
 			   opcode == ESB_PONG_FLAG_CLEAR_CHANNEL) {
 			status = RCV_HID_ST_EINVAL;
@@ -729,6 +915,23 @@ bool rcv_cmd_process_hid(const uint8_t *buf, size_t len, uint8_t ack_out[RCV_HID
 			break;
 		case RCV_HID_OP_COLLECT_STOP:
 			status = rcv_cmd_collect_stop();
+			break;
+		case RCV_HID_OP_COLLECT_BATCH_START:
+			if (args_len < 2) {
+				status = RCV_HID_ST_EINVAL;
+			} else {
+				status = rcv_cmd_collect_batch_start(sys_get_le16(args));
+			}
+			break;
+		case RCV_HID_OP_COLLECT_META:
+			if (args_len < 3) {
+				status = RCV_HID_ST_EINVAL;
+			} else {
+				status = rcv_cmd_collect_meta(args[0], args[1], args[2]);
+			}
+			break;
+		case RCV_HID_OP_COLLECT_BATCH_STOP:
+			status = rcv_cmd_collect_batch_stop();
 			break;
 		case RCV_HID_OP_REBOOT:
 			status = rcv_cmd_reboot();
