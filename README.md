@@ -20,6 +20,20 @@ This fork continues development alongside our [tracker firmware](https://github.
 
 Use matching tracker, receiver, and host-tool versions for fork-specific features.
 
+## SDK and build environment
+
+`west.yml` selects [jitingcn/sdk-nrf](https://github.com/jitingcn/sdk-nrf)
+`v3.4-branch`, based on the official NCS `v3.4.0` release.
+
+Builds require Zephyr SDK **1.0.1 GNU** (`zephyr/gnu`, GCC 14.3.0) and
+**Python 3.12**. The firmware uses Picolibc; CI runs on Ubuntu 24.04.
+
+The firmware depends on the SDK's ESB extensions and USB fixes; stock NCS
+is not a drop-in replacement. UF2 generation uses `CONFIG_BUILD_OUTPUT_HEX=y`
+to read image addresses from HEX output. The SDK includes the
+[upstream HEX-first UF2 fix](https://github.com/zephyrproject-rtos/zephyr/pull/107944)
+required for mapped partitions.
+
 ## Raw collection metadata
 
 Update the tracker firmware, receiver firmware, and collector together for
