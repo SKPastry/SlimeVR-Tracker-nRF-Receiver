@@ -707,7 +707,8 @@ static int console_input_install(void)
 static bool console_line_is_current(uint32_t epoch)
 {
 	k_spinlock_key_t key = k_spin_lock(&console_input.lock);
-	bool current = console_input.active && console_input.epoch == epoch;
+	/* Completed lines remain eligible across ordinary DTR close/reopen. */
+	bool current = console_input.epoch == epoch;
 	k_spin_unlock(&console_input.lock, key);
 	return current;
 }
@@ -747,9 +748,7 @@ void console_serial_start(void)
 	console_drain_uart_locked();
 
 	console_input.active = true;
-	console_input.epoch++;
 	console_reset_line_locked();
-	console_drop_queued_lines_locked();
 	console_input.echo_head = 0;
 	console_input.echo_tail = 0;
 	opened = true;
@@ -771,13 +770,10 @@ void console_serial_start(void)
 	}
 }
 
-void console_serial_stop(void)
+static void console_close_input_locked(void)
 {
-	k_spinlock_key_t key = k_spin_lock(&console_input.lock);
 	console_input.active = false;
-	console_input.epoch++;
 	console_reset_line_locked();
-	console_drop_queued_lines_locked();
 	console_input.echo_head = 0;
 	console_input.echo_tail = 0;
 	if (console_input.initialized) {
@@ -785,6 +781,21 @@ void console_serial_stop(void)
 		uart_irq_rx_disable(console_uart_dev);
 		console_drain_uart_locked();
 	}
+}
+
+void console_serial_close(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&console_input.lock);
+	console_close_input_locked();
+	k_spin_unlock(&console_input.lock, key);
+}
+
+void console_serial_stop(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&console_input.lock);
+	console_close_input_locked();
+	console_input.epoch++;
+	console_drop_queued_lines_locked();
 	k_spin_unlock(&console_input.lock, key);
 }
 

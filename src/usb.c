@@ -240,13 +240,17 @@ static int usb_enable_device(struct usbd_context *ctx)
 	return ret;
 }
 
-static void usb_close_serial(void)
+static void usb_close_serial(bool invalidate)
 {
 	k_mutex_lock(&usb_serial_transition_lock, K_FOREVER);
 	if (get_status(SYS_STATUS_SERIAL_ACTIVE)) {
 		set_status(SYS_STATUS_SERIAL_ACTIVE, false);
 	}
-	console_serial_stop();
+	if (invalidate) {
+		console_serial_stop();
+	} else {
+		console_serial_close();
+	}
 	log_backend_disable(log_backend_get_by_name("log_backend_uart"));
 	k_mutex_unlock(&usb_serial_transition_lock);
 }
@@ -258,12 +262,12 @@ static void status_cb(struct usbd_context *const ctx, const struct usbd_msg *con
 	switch (msg->type) {
 	case USBD_MSG_RESET:
 		receiver_usb_set_configured(false);
-		usb_close_serial();
+		usb_close_serial(true);
 		break;
 	case USBD_MSG_CONFIGURATION:
 		receiver_usb_set_configured(msg->status != 0);
 		if (msg->status == 0) {
-			usb_close_serial();
+			usb_close_serial(true);
 		}
 		break;
 	case USBD_MSG_VBUS_READY:
@@ -274,7 +278,7 @@ static void status_cb(struct usbd_context *const ctx, const struct usbd_msg *con
 		break;
 	case USBD_MSG_VBUS_REMOVED:
 		receiver_usb_set_configured(false);
-		usb_close_serial();
+		usb_close_serial(true);
 		usb_enabled = false;
 		disable_ret = usbd_disable(ctx);
 		if (disable_ret != 0) {
@@ -392,13 +396,13 @@ static void usb_ctrl_thread(void)
 							      &baudrate) == 0 && baudrate == 1200;
 			if (request_dfu) {
 				NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_SERIAL_ONLY_RESET;
-				usb_close_serial();
+				usb_close_serial(true);
 				k_msleep(100);
 				sys_request_system_reboot();
 				continue;
 			}
 #endif
-			usb_close_serial();
+			usb_close_serial(false);
 		}
 	}
 }
