@@ -121,6 +121,21 @@ static uint32_t dc_contiguous_len(void)
 	return DATA_COLLECT_BUF_SIZE - tail;
 }
 
+static void dc_tx_kick_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(dc_tx_kick_work, dc_tx_kick_work_handler);
+
+/* IRQ callbacks and producer kicks may run on different workqueues. Disable
+ * first, then recheck: a producer before the disable must not lose its enable.
+ * A producer after the recheck schedules its own kick.
+ */
+static void dc_tx_pause(const struct device *dev)
+{
+	uart_irq_tx_disable(dev);
+	if (dc_buf_tail != dc_buf_head) {
+		k_work_schedule(&dc_tx_kick_work, K_MSEC(1));
+	}
+}
+
 static void dc_uart_irq_callback(const struct device *dev, void *user_data)
 {
 	ARG_UNUSED(user_data);
@@ -136,25 +151,25 @@ static void dc_uart_irq_callback(const struct device *dev, void *user_data)
 
 		if (!cdc_host_is_open()) {
 			dc_discard_buffer();
-			uart_irq_tx_disable(dev);
+			dc_tx_pause(dev);
 			continue;
 		}
 
 		uint32_t len = dc_contiguous_len();
 		if (len == 0) {
-			uart_irq_tx_disable(dev);
+			dc_tx_pause(dev);
 			continue;
 		}
 
 		int sent = uart_fifo_fill(dev, &dc_buf[dc_buf_tail], len);
 		if (sent <= 0) {
-			uart_irq_tx_disable(dev);
+			dc_tx_pause(dev);
 			continue;
 		}
 
 		dc_buf_tail = (dc_buf_tail + (uint32_t)sent) % DATA_COLLECT_BUF_SIZE;
 		if (dc_buf_tail == dc_buf_head) {
-			uart_irq_tx_disable(dev);
+			dc_tx_pause(dev);
 		}
 	}
 }
@@ -174,9 +189,15 @@ static void dc_tx_kick_work_handler(struct k_work *work)
 
 	if (dc_buf_tail != dc_buf_head) {
 		uart_irq_tx_enable(cdc_dev);
+		/* The CDC driver normally advances TX from completion/enable/resume.
+		 * Keep a bounded fallback only while app bytes remain: FIFO-full can
+		 * suppress callbacks, including observation of DTR closing.
+		 */
+		if (dc_buf_tail != dc_buf_head) {
+			k_work_schedule(&dc_tx_kick_work, K_MSEC(1));
+		}
 	}
 }
-static K_WORK_DEFINE(dc_tx_kick_work, dc_tx_kick_work_handler);
 
 static void dc_timer_handler(struct k_timer *timer);
 static K_TIMER_DEFINE(dc_timer, dc_timer_handler, NULL);
@@ -213,7 +234,6 @@ static void dc_timeout_work_handler(struct k_work *work)
 static void dc_timer_handler(struct k_timer *timer)
 {
 	ARG_UNUSED(timer);
-	k_work_submit(&dc_tx_kick_work);
 
 	/* Check for data collection timeout */
 	if ((dc_active || dc_batch_active) && dc_last_rx_time > 0 &&
@@ -241,7 +261,7 @@ int data_collect_init(void)
 	dc_active = false;
 	dc_batch_active = false;
 	dc_batch_mask = 0;
-	k_timer_start(&dc_timer, K_MSEC(1), K_MSEC(1));
+	k_timer_start(&dc_timer, K_SECONDS(1), K_SECONDS(1));
 
 	LOG_INF("Data collection subsystem initialized");
 	return 0;
@@ -361,5 +381,5 @@ void data_collect_write(const uint8_t *data, uint8_t len, uint8_t rssi)
 
 	dc_frames_sent++;
 
-	k_work_submit(&dc_tx_kick_work);
+	k_work_schedule(&dc_tx_kick_work, K_NO_WAIT);
 }
