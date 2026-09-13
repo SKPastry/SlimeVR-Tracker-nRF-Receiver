@@ -25,18 +25,11 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include <esb.h>
+#include "connection/esb.h"
 
 /*
  * ESB OTA Protocol Constants (shared with tracker)
  */
-#define ESB_OTA_DATA_TYPE       0x20
-#define ESB_OTA_STATUS_TYPE     0x21
-#define ESB_OTA_FW_INFO_TYPE    0x22
-#define ESB_OTA_BEGIN_TYPE      0x23
-#define ESB_OTA_VERIFY_TYPE     0x24
-#define ESB_OTA_ACTIVATE_TYPE   0x25
-
 #define OTA_DATA_HEADER_SIZE    4
 #define OTA_DATA_MAX_PAYLOAD    60
 
