@@ -45,6 +45,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/crc.h>
 #include <zephyr/logging/log.h>
 #include <string.h>
 
@@ -201,18 +202,6 @@ static uint32_t ring_count(void)
 static bool ring_full(void)
 {
 	return ring_count() >= OTA_TX_RING_SIZE;
-}
-
-static uint8_t ota_crc8(const uint8_t *data, size_t len)
-{
-	uint8_t crc = 0x07;
-	for (size_t i = 0; i < len; i++) {
-		crc ^= data[i];
-		for (uint8_t bit = 0; bit < 8; bit++) {
-			crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
-		}
-	}
-	return crc;
 }
 
 static bool ota_abort_pending(uint8_t tracker_id);
@@ -446,14 +435,7 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 		}
 
 		/* CRC-8 */
-		uint8_t crc = 0;
-		for (int i = 0; i < 63; i++) {
-			crc ^= begin_pkt[i];
-			for (int j = 0; j < 8; j++) {
-				crc = (crc & 0x80) ? ((crc << 1) ^ 0x07) : (crc << 1);
-			}
-		}
-		begin_pkt[63] = crc;
+		begin_pkt[63] = crc8_ccitt(0, begin_pkt, 63);
 
 		memcpy(t->pending_cmd_data, begin_pkt, OTA_BEGIN_PACKET_SIZE);
 		t->pending_cmd_len = OTA_BEGIN_PACKET_SIZE;
@@ -603,7 +585,7 @@ void esb_ota_relay_fill_ack(uint8_t tracker_id, uint32_t pipe_id,
 		/* A legacy staged-OTA tracker may also parse this as a clock PONG. */
 		sys_put_be32((uint32_t)k_uptime_ticks(), &ack_payload->data[3]);
 		ack_payload->data[7] = ESB_PONG_FLAG_OTA_ABORT;
-		ack_payload->data[ESB_PONG_LEN - 1] = ota_crc8(ack_payload->data, ESB_PONG_LEN - 1);
+		ack_payload->data[ESB_PONG_LEN - 1] = crc8_ccitt(0x07, ack_payload->data, ESB_PONG_LEN - 1);
 		*has_ack = true;
 		return;
 	}

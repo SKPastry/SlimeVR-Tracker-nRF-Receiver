@@ -128,20 +128,6 @@ struct bootloader_settings {
 	uint32_t sd_image_start;
 } __attribute__((packed));
 
-/* ── CRC helpers ─────────────────────────────────────────────────── */
-
-static inline uint8_t rcv_ota_crc8(const uint8_t *data, size_t len)
-{
-	uint8_t crc = 0;
-	for (size_t i = 0; i < len; i++) {
-		crc ^= data[i];
-		for (int j = 0; j < 8; j++) {
-			crc = (crc & 0x80) ? ((crc << 1) ^ 0x07) : (crc << 1);
-		}
-	}
-	return crc;
-}
-
 /* ── OTA State ───────────────────────────────────────────────────── */
 
 enum rcv_ota_state {
@@ -297,7 +283,7 @@ static void rcv_ota_send_fw_info(void)
 	sys_put_be16((uint16_t)((RCV_OTA_USE_MCUBOOT ? 0 : RCV_OTA_FLASH_BASE) >> 12),
 		     &info[63]);
 
-	info[65] = rcv_ota_crc8(info, 65);
+	info[65] = crc8_ccitt(0, info, 65);
 
 	/* Send as 6 chunked HID sub-reports (same as tracker FW_INFO relay) */
 	for (int chunk = 0; chunk < 6; chunk++) {

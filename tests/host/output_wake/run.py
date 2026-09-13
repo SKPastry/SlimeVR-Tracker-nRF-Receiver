@@ -238,6 +238,18 @@ int main(int argc, char **argv) {
 
 cdc_source = (src / 'data_collect.c').read_text()
 cdc_body = cdc_source[cdc_source.index('LOG_MODULE_REGISTER'):]
+cdc_crc = ''
+try:
+    function(cdc_body, 'crc8_ccitt')
+except ValueError:
+    zephyr_base = Path(os.environ.get(
+        'ZEPHYR_BASE',
+        (Path(__file__).resolve().parents[4] / 'sdk-nrf').resolve().parent / 'zephyr',
+    ))
+    crc_source = (zephyr_base / 'subsys/crc/crc8_sw.c').read_text()
+    crc_table_start = crc_source.index('static const uint8_t crc8_ccitt_small_table')
+    crc_table_end = crc_source.index('};', crc_table_start) + 2
+    cdc_crc = '#define __weak\n' + crc_source[crc_table_start:crc_table_end] + '\n' + function(crc_source, 'crc8_ccitt')
 cdc = common + r'''
 #define UART_LINE_CTRL_DTR 1
 #define ESB_PONG_FLAG_DATA_COLLECT_OFF 1
@@ -266,7 +278,7 @@ static unsigned off_commands;
 static void esb_send_remote_command(uint8_t id, int flag) { off_commands++; }
 void data_collect_stop(void);
 void data_collect_batch_stop(void);
-''' + cdc_body + r'''
+''' + cdc_crc + cdc_body + r'''
 static const uint8_t payload[]={0x12,3,0x55,0xaa,0x19};
 static void publish(void) { data_collect_write(payload,sizeof(payload),0x91); }
 static void irq(void) { if (uart_ready && tx_enabled && space) uart_callback(&device,NULL); }

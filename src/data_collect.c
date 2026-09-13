@@ -29,6 +29,7 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/crc.h>
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(data_collect, LOG_LEVEL_INF);
@@ -57,21 +58,6 @@ static uint32_t dc_batch_mask;
 /* Timeout: auto-stop if no raw data received for this long */
 #define DC_TIMEOUT_MS 60000
 static int64_t dc_last_rx_time;
-
-/* CRC-8 CCITT (polynomial 0x07) - same as ESB uses */
-static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t len)
-{
-	for (size_t i = 0; i < len; i++) {
-		crc ^= data[i];
-		for (int j = 0; j < 8; j++) {
-			if (crc & 0x80)
-				crc = (crc << 1) ^ 0x07;
-			else
-				crc <<= 1;
-		}
-	}
-	return crc;
-}
 
 static inline uint32_t buf_used(void)
 {
