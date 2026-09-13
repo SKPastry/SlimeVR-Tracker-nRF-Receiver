@@ -201,9 +201,9 @@ static uint8_t receiver_rf_channel = 0xFF; // Current RF channel of the receiver
 #define PING_TIMEOUT_MS 5000               // PING timeout threshold: 5 seconds
 #define REMOTE_COMMAND_ACTIVE_SCAN_MS 1000 // Time window to detect trackers actively sending data
 
-/* R2 membership shadow. This observes valid traffic and computes the layout
- * that a future effective-frame protocol would apply. It never writes the
- * current TDMA config or epoch. */
+/* Membership shadow combines valid PING/data evidence into the desired live
+ * mask, with join confirmation and leave grace. tdma_recalculate() consumes
+ * that mask and owns debounced TDMA config/epoch publication. */
 #define TDMA_SHADOW_JOIN_CONFIRM_MS 2000
 #define TDMA_SHADOW_FRESH_MS (PING_TIMEOUT_MS + 1000)
 #define TDMA_SHADOW_LEAVE_GRACE_MS 15000
