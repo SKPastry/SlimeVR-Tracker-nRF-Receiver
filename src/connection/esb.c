@@ -105,10 +105,11 @@ bool esb_channel_is_allowed(uint8_t channel)
 static const uint16_t tdma_cap_ladder[] = {220, 180, 150, 130, 115};
 #define TDMA_CAP_LEVEL_MAX (ARRAY_SIZE(tdma_cap_ladder) - 1U)
 #define TDMA_LOSS_TRIGGER_PERMILLE 50  /* >5% aggregate gap loss */
-#define TDMA_LOSS_TRIGGER_WINDOWS 5    /* ...for 5 consecutive 1 s windows */
+#define TDMA_LOSS_TRIGGER_TICKS 5      /* 5 qualified, nonempty stats ticks */
 #define TDMA_LOSS_RECOVER_PERMILLE 10  /* <1% aggregate gap loss */
-#define TDMA_LOSS_RECOVER_WINDOWS 30   /* ...for 30 consecutive 1 s windows */
-#define TDMA_LOSS_MIN_SAMPLES 100 /* enough evidence at the 115 TPS floor */
+#define TDMA_LOSS_RECOVER_TICKS 30     /* fast recovery after 30 qualified ticks */
+#define TDMA_LOSS_PROBE_TICKS 120      /* slow recovery probe after 120 ticks below 5% */
+#define TDMA_LOSS_MIN_SAMPLES 100      /* pool sparse ticks until enough evidence */
 #define TDMA_LOSS_RECONFIG_MIN_MS 15000 /* min spacing between ladder steps */
 #define TDMA_SYNC_EXTRAP_MAX_TICKS (10u * 32768u) /* skip frozen-skew extrapolation beyond this PING age */
 #define PING_CLEAN_REACQUIRE_STREAK 8u            /* consecutive dirty PINGs before re-baselining */
@@ -122,16 +123,32 @@ static uint8_t tdma_dynamic_slot_ticks;   // current slot width in ticks
 static uint32_t tdma_active_mask;         // bitmask of active trackers (for change detection)
 static int64_t tdma_last_reconfig_time;   // timestamp of last reconfiguration (0 = never)
 /* Loss-controller state, evaluated once per 1 s stats tick. */
-static uint8_t tdma_cap_level;             /* index into tdma_cap_ladder */
-static uint8_t tdma_loss_trigger_streak;   /* consecutive lossy 1 s windows */
-static uint8_t tdma_published_cap_level;   /* level in effect in the live layout */
-static uint8_t tdma_loss_recover_streak;   /* consecutive clean 1 s windows */
+static uint8_t tdma_cap_level;           /* index into tdma_cap_ladder */
+static uint8_t tdma_published_cap_level; /* level in effect in the live layout */
+static uint8_t tdma_loss_trigger_streak_ticks;
+static uint8_t tdma_loss_recover_streak_ticks;
+static uint8_t tdma_loss_probe_streak_ticks;
+/* Samples determine when to judge a pool; its nonempty 1 s ticks credit streaks. */
+static uint32_t tdma_loss_pool_received;
+static uint32_t tdma_loss_pool_gaps;
+static uint8_t tdma_loss_pool_ticks;
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 static int64_t tdma_last_loss_step_ms;   /* last applied ladder step (log only) */
 static uint32_t tdma_loss_last_permille; /* last judged window (log only) */
 #endif
 static uint32_t tdma_prev_recv[MAX_TRACKERS];
 static uint32_t tdma_prev_gaps[MAX_TRACKERS];
+static uint32_t tdma_prev_restarts[MAX_TRACKERS];
+
+static void tdma_loss_reset_windows(void)
+{
+	tdma_loss_trigger_streak_ticks = 0;
+	tdma_loss_recover_streak_ticks = 0;
+	tdma_loss_probe_streak_ticks = 0;
+	tdma_loss_pool_received = 0;
+	tdma_loss_pool_gaps = 0;
+	tdma_loss_pool_ticks = 0;
+}
 
 
 static inline uint32_t tdma_pack_config(uint8_t slot, uint8_t total, uint8_t slot_ticks, uint8_t epoch)
@@ -537,8 +554,7 @@ static void tdma_recalculate(void)
 		/* Membership churn restarts loss learning: the old ladder level
 		 * described a different layout and tracker mix. */
 		tdma_cap_level = 0;
-		tdma_loss_trigger_streak = 0;
-		tdma_loss_recover_streak = 0;
+		tdma_loss_reset_windows();
 	}
 	if (!mask_changed && (data_collect_is_active() || data_collect_batch_is_active())) {
 		/* Also cancel a deferred ladder step if collection started after
@@ -796,27 +812,36 @@ static void tdma_sync_stats_reset(void)
 	memset(g_extrap_skip_count, 0, sizeof(g_extrap_skip_count));
 }
 
-/* Aggregate loss ladder controller. Runs once per 1 s stats tick, before
- * tdma_recalculate(). Metric: normal/composite sequence-gap share of
- * received+gaps over active trackers, not the independent raw capture stream.
- * A sustained >5% window steps the cap down one ladder level; 30 s of <1%
- * steps back up. tdma_recalculate() owns debounce and publication. */
+/* Aggregate normal/composite sequence-gap loss, excluding raw capture.
+ * Pool consecutive nonempty 1 s stats ticks until at least 100 samples exist;
+ * classify the whole pool and credit its ticks, never an idle interval.
+ * >5% for 5 qualified ticks steps down; <1% for 30 steps up. Below 5%
+ * for 120 ticks permits one slower probe, avoiding permanent 1–5% lock-in.
+ * Publication/debounce stays owned by tdma_recalculate(). */
 static void tdma_loss_controller_tick(int64_t now)
 {
 	ARG_UNUSED(now);
 
-	uint32_t recv = 0;
-	uint32_t gaps = 0;
+	uint32_t tick_received = 0;
+	uint32_t tick_gaps = 0;
+	bool discontinuity = false;
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
 		uint32_t r = tracker_stats[i].total_received;
 		uint32_t g = tracker_stats[i].total_gaps;
 		uint32_t prev_r = tdma_prev_recv[i];
 		uint32_t prev_g = tdma_prev_gaps[i];
+		uint32_t restarts = tracker_stats[i].restart_events;
+		bool restarted = restarts != tdma_prev_restarts[i];
+		tdma_prev_restarts[i] = restarts;
 		tdma_prev_recv[i] = r;
 		tdma_prev_gaps[i] = g;
-		/* Monotonic counters; inactive trackers and a console stats reset
-		 * (counters jump backward) resync silently and contribute nothing. */
-		if (!(tdma_active_mask & BIT(i)) || r < prev_r || g < prev_g) {
+		/* A reset/restart is not a loss window. Never carry recovery evidence
+		 * across a sequence epoch, even when other trackers remain active. */
+		if (!(tdma_active_mask & BIT(i))) {
+			continue;
+		}
+		if (r < prev_r || g < prev_g || restarted) {
+			discontinuity = true;
 			continue;
 		}
 		uint32_t delta_recv = r - prev_r;
@@ -824,8 +849,8 @@ static void tdma_loss_controller_tick(int64_t now)
 		if (delta_recv + delta_gaps == 0) {
 			continue;
 		}
-		recv += delta_recv;
-		gaps += delta_gaps;
+		tick_received += delta_recv;
+		tick_gaps += delta_gaps;
 	}
 
 	/* Always advance snapshots above. Otherwise leaving an excluded mode would
@@ -836,10 +861,9 @@ static void tdma_loss_controller_tick(int64_t now)
 		 * a layout change underneath the independent raw stream. */
 		tdma_cap_level = tdma_published_cap_level;
 	}
-	if (collecting || esb_ota_relay_is_active()
+	if (discontinuity || collecting || esb_ota_relay_is_active()
 	    || (atomic_get(&test_all_state_valid) && atomic_get(&test_all_enabled))) {
-		tdma_loss_trigger_streak = 0;
-		tdma_loss_recover_streak = 0;
+		tdma_loss_reset_windows();
 		return;
 	}
 
@@ -847,40 +871,49 @@ static void tdma_loss_controller_tick(int64_t now)
 	 * no-op) before another step can be requested. This prevents a 15 s
 	 * reconfiguration debounce from accumulating three 5 s down-steps. */
 	if (tdma_cap_level != tdma_published_cap_level) {
+		tdma_loss_reset_windows();
 		return;
 	}
 
-	uint32_t samples = recv + gaps;
-	if (samples < TDMA_LOSS_MIN_SAMPLES) {
-		/* Insufficient evidence breaks consecutiveness; it must not bridge a
-		 * quiet interval between otherwise lossy or clean windows. */
-		tdma_loss_trigger_streak = 0;
-		tdma_loss_recover_streak = 0;
+	if (tick_received + tick_gaps == 0) {
+		tdma_loss_reset_windows();
 		return;
 	}
-	uint32_t loss_permille = gaps * 1000U / samples;
+	tdma_loss_pool_received += tick_received;
+	tdma_loss_pool_gaps += tick_gaps;
+	tdma_loss_pool_ticks++;
+	uint32_t pool_samples = tdma_loss_pool_received + tdma_loss_pool_gaps;
+	if (pool_samples < TDMA_LOSS_MIN_SAMPLES) {
+		return;
+	}
+
+	/* Judge the pooled ratio once, crediting every contributing nonempty tick. */
+	uint32_t pool_received = tdma_loss_pool_received;
+	uint32_t pool_gaps = tdma_loss_pool_gaps;
+	uint8_t credited_ticks = tdma_loss_pool_ticks;
+	tdma_loss_pool_received = 0;
+	tdma_loss_pool_gaps = 0;
+	tdma_loss_pool_ticks = 0;
+
+	/* Compare exact ratios; rounded permille is only for diagnostics/logging. */
+	uint64_t scaled_gaps = (uint64_t)pool_gaps * 1000U;
+	bool above_trigger = scaled_gaps > (uint64_t)TDMA_LOSS_TRIGGER_PERMILLE * pool_samples;
+	bool below_recover = scaled_gaps < (uint64_t)TDMA_LOSS_RECOVER_PERMILLE * pool_samples;
+	bool below_trigger = scaled_gaps < (uint64_t)TDMA_LOSS_TRIGGER_PERMILLE * pool_samples;
+	uint32_t loss_permille = scaled_gaps / pool_samples;
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 	tdma_loss_last_permille = loss_permille;
 #endif
-	if (loss_permille > TDMA_LOSS_TRIGGER_PERMILLE) {
-		if (tdma_loss_trigger_streak < TDMA_LOSS_TRIGGER_WINDOWS) {
-			tdma_loss_trigger_streak++;
-		}
-		tdma_loss_recover_streak = 0;
-	} else if (loss_permille < TDMA_LOSS_RECOVER_PERMILLE) {
-		if (tdma_loss_recover_streak < TDMA_LOSS_RECOVER_WINDOWS) {
-			tdma_loss_recover_streak++;
-		}
-		tdma_loss_trigger_streak = 0;
-	} else {
-		tdma_loss_trigger_streak = 0;
-		tdma_loss_recover_streak = 0;
-	}
+	tdma_loss_trigger_streak_ticks
+		= above_trigger ? MIN(tdma_loss_trigger_streak_ticks + credited_ticks, TDMA_LOSS_TRIGGER_TICKS) : 0;
+	tdma_loss_recover_streak_ticks
+		= below_recover ? MIN(tdma_loss_recover_streak_ticks + credited_ticks, TDMA_LOSS_RECOVER_TICKS) : 0;
+	tdma_loss_probe_streak_ticks
+		= below_trigger ? MIN(tdma_loss_probe_streak_ticks + credited_ticks, TDMA_LOSS_PROBE_TICKS) : 0;
 
-	if (tdma_loss_trigger_streak >= TDMA_LOSS_TRIGGER_WINDOWS
-	    && tdma_cap_level < TDMA_CAP_LEVEL_MAX) {
+	if (tdma_loss_trigger_streak_ticks >= TDMA_LOSS_TRIGGER_TICKS && tdma_cap_level < TDMA_CAP_LEVEL_MAX) {
 		tdma_cap_level++;
-		tdma_loss_trigger_streak = 0;
+		tdma_loss_reset_windows();
 		LOG_WRN(
 			"TDMA loss ladder DOWN: lvl=%u/%u cap=%u loss=%u.%u%% recv=%u gaps=%u",
 			tdma_cap_level,
@@ -888,13 +921,14 @@ static void tdma_loss_controller_tick(int64_t now)
 			tdma_cap_ladder[tdma_cap_level],
 			loss_permille / 10,
 			loss_permille % 10,
-			recv,
-			gaps
+			pool_received,
+			pool_gaps
 		);
-	} else if (tdma_loss_recover_streak >= TDMA_LOSS_RECOVER_WINDOWS
-		   && tdma_cap_level > 0) {
+	} else if ((tdma_loss_recover_streak_ticks >= TDMA_LOSS_RECOVER_TICKS
+				|| tdma_loss_probe_streak_ticks >= TDMA_LOSS_PROBE_TICKS)
+			   && tdma_cap_level > 0) {
 		tdma_cap_level--;
-		tdma_loss_recover_streak = 0;
+		tdma_loss_reset_windows();
 		LOG_INF(
 			"TDMA loss ladder UP: lvl=%u/%u cap=%u",
 			tdma_cap_level,
@@ -2163,6 +2197,10 @@ void event_handler(struct esb_evt const *event)
 							last_ping_counter[tracker_id] = counter;
 							// Reset PONG queue tracking
 							last_pong_queued_counter[tracker_id] = 0xFF;
+							/* The first data sequence after reboot is unrelated to
+							 * the old stream; retain totals but re-anchor admission. */
+							packet_count[tracker_id] = 0;
+							tracker_stats[tracker_id].restart_events++;
 							if (atomic_get(&test_all_state_valid)) {
 								test_all_invalidate_tracker(tracker_id, (int64_t)current_time);
 							}
@@ -3456,7 +3494,7 @@ void esb_print_health_snapshot(void)
 
 	uint32_t desired_mask = (uint32_t)atomic_get(&tdma_shadow_desired_mask);
 	LOG_INF(
-		"HEALTH TDMA source=data_ping_shadow stored=%u active=%u mask=0x%04x desired=0x%04x recent=0x%04x slot=%u epoch=%u TPS=%u HID=%u recv=%u gaps=%u hid_drop_total=%u cap=%u lvl=%u/%u loss_pm=%u trig=%u rec=%u step_ms=%lld",
+		"HEALTH TDMA source=data_ping_shadow stored=%u active=%u mask=0x%04x desired=0x%04x recent=0x%04x slot=%u epoch=%u TPS=%u HID=%u recv=%u gaps=%u hid_drop_total=%u cap=%u lvl=%u/%u loss_pm=%u trig=%u rec=%u probe=%u step_ms=%lld",
 		stored_trackers,
 		tdma_dynamic_active_count,
 		(unsigned int)tdma_active_mask,
@@ -3475,6 +3513,7 @@ void esb_print_health_snapshot(void)
 		tdma_loss_last_permille,
 		tdma_loss_trigger_streak,
 		tdma_loss_recover_streak,
+		tdma_loss_probe_streak,
 		tdma_last_loss_step_ms
 	);
 	LOG_INF("HEALTH observed=0x%04x", (unsigned int)observed_mask);
@@ -3589,14 +3628,14 @@ void esb_reset_all_stats(void)
 		last_pong_queued_counter[i] = 0;
 	}
 	tdma_sync_stats_reset();
-	tdma_loss_trigger_streak = 0;
-	tdma_loss_recover_streak = 0;
+	tdma_loss_reset_windows();
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 	tdma_last_loss_step_ms = 0;
 	tdma_loss_last_permille = 0;
 #endif
 	memset(tdma_prev_recv, 0, sizeof(tdma_prev_recv));
 	memset(tdma_prev_gaps, 0, sizeof(tdma_prev_gaps));
+	memset(tdma_prev_restarts, 0, sizeof(tdma_prev_restarts));
 	LOG_INF("All packet statistics have been reset");
 }
 // Toggle detailed statistics display on/off
