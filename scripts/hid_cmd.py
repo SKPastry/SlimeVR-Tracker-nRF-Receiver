@@ -18,8 +18,12 @@ Examples:
   hid_cmd.py send 0 sens auto z 5
   hid_cmd.py send all reset zro
   hid_cmd.py send all tcal auto on
+  hid_cmd.py send 0 tcal heat start
   hid_cmd.py tracker-channel 25
   hid_cmd.py --gui
+
+Heated start uses the tracker's configured default target. Its ACK confirms
+delivery only, not that heating was accepted or started.
 """
 
 from __future__ import annotations
@@ -213,6 +217,7 @@ PONG_FLAG = {
     "sens-auto": 0x24,
     "mag-auto-on": 0x25,
     "mag-auto-off": 0x26,
+    "tcal-heat-start": 0x27,
     "ota-query-info": 0x30,
     "ota-abort": 0x31,
     "ota-suppress": 0x32,
@@ -495,9 +500,13 @@ def build_send(target: str, tokens: list[str]) -> tuple[int, bytes]:
     if cmd == "tcal":
         if not rest:
             raise ValueError(
-                "Usage: send <id|all> tcal <on|off|reset|auto on|auto off|boot on|boot off>"
+                "Usage: send <id|all> tcal <on|off|reset|auto on|auto off|boot on|boot off|heat start>"
             )
         sub = rest[0]
+        if sub == "heat":
+            if rest != ["heat", "start"]:
+                raise ValueError("Usage: send <id|all> tcal heat start (no target argument)")
+            return PONG_FLAG["tcal-heat-start"], bytes([tid])
         if sub == "on":
             return PONG_FLAG["tcal-on"], bytes([tid])
         if sub == "off":
@@ -560,6 +569,8 @@ def build_send(target: str, tokens: list[str]) -> tuple[int, bytes]:
 
     # Flat aliases (mag-on, tcal-auto-on, …) and simple console names
     if cmd in PONG_FLAG:
+        if cmd == "tcal-heat-start" and rest:
+            raise ValueError("Usage: send <id|all> tcal-heat-start (no arguments)")
         return PONG_FLAG[cmd], bytes([tid])
 
     # fusion as alias already in map; 6-side etc.

@@ -3342,6 +3342,8 @@ static const char *esb_pong_flag_name(uint8_t flag)
 		return "TCAL_AUTO_ON";
 	case ESB_PONG_FLAG_TCAL_AUTO_OFF:
 		return "TCAL_AUTO_OFF";
+	case ESB_PONG_FLAG_TCAL_HEATED_START:
+		return "TCAL_HEATED_START";
 	case ESB_PONG_FLAG_FUSION_RESET:
 		return "FUSION_RESET";
 	case ESB_PONG_FLAG_TCAL_BOOT_ON:

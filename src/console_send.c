@@ -367,7 +367,7 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 		return;
 	} else if (strcmp(arg2, "tcal") == 0) {
 		if (!arg3) {
-			printk("Usage: send <id|all> tcal <on|off|auto on|auto off|boot on|boot off|clear>\n");
+			printk("Usage: send <id|all> tcal <on|off|auto on|auto off|boot on|boot off|clear|heat start>\n");
 			printk("Example: send 0 tcal on       - Enable temperature calibration on tracker 0\n");
 			printk(
 				"Example: send all tcal off    - Disable temperature calibration on all active trackers\n"
@@ -376,10 +376,18 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 			printk("Example: send all tcal auto off - Disable auto-calibration on all active trackers\n");
 			printk("Example: send 0 tcal boot on - Enable boot calibration on tracker 0\n");
 			printk("Example: send 0 tcal clear - Clear temperature calibration on tracker 0\n");
+			printk("Example: send 0 tcal heat start - Request heated calibration at the tracker default target\n");
+			printk("Heated-start ACK confirms delivery only, not heating acceptance.\n");
 			return;
 		}
 
-		if (strcmp(arg3, "on") == 0) {
+		if (strcmp(arg3, "heat") == 0) {
+			if (!arg4 || strcmp(arg4, "start") != 0 || arg5) {
+				printk("Usage: send <id|all> tcal heat start (no target argument)\n");
+				return;
+			}
+			console_send_flag(target_all, tracker_id, ESB_PONG_FLAG_TCAL_HEATED_START, "Heated T-Cal start");
+		} else if (strcmp(arg3, "on") == 0) {
 			console_send_flag(target_all, tracker_id, ESB_PONG_FLAG_TCAL_ON, "T-Cal enable");
 		} else if (strcmp(arg3, "off") == 0) {
 			console_send_flag(target_all, tracker_id, ESB_PONG_FLAG_TCAL_OFF, "T-Cal disable");
@@ -428,7 +436,7 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 
 			console_send_flag(target_all, tracker_id, tcal_cmd, tcal_name);
 		} else {
-			printk("Unknown tcal subcommand: %s (use 'on', 'off', 'auto', 'boot' or 'clear')\n", arg3);
+			printk("Unknown tcal subcommand: %s (use 'on', 'off', 'auto', 'boot', 'clear' or 'heat start')\n", arg3);
 		}
 		return;
 	} else if (strcmp(arg2, "tdma") == 0) {
