@@ -32,6 +32,7 @@ static atomic_t ch_hid_pending = ATOMIC_INIT(0);
 static uint8_t ch_hid_seq;
 static uint8_t ch_hid_opcode;
 static rcv_cmd_async_ack_fn async_ack_fn;
+static K_MUTEX_DEFINE(channel_completion_lock);
 
 enum pending_reset {
 	PENDING_RESET_NONE = 0,
@@ -639,16 +640,13 @@ static void arm_ch_hid_completion(uint8_t seq, uint8_t opcode)
 
 static void on_tracker_channel_done(bool success)
 {
-	if (!atomic_cas(&ch_hid_pending, 1, 0)) {
-		return;
+	k_mutex_lock(&channel_completion_lock, K_FOREVER);
+	if (atomic_cas(&ch_hid_pending, 1, 0) && async_ack_fn) {
+		uint8_t ack[RCV_HID_CMD_LEN];
+		fill_ack(ack, ch_hid_seq, ch_hid_opcode, success ? RCV_HID_ST_OK : RCV_HID_ST_ENOENT);
+		async_ack_fn(ack);
 	}
-	if (!async_ack_fn) {
-		return;
-	}
-
-	uint8_t ack[RCV_HID_CMD_LEN];
-	fill_ack(ack, ch_hid_seq, ch_hid_opcode, success ? RCV_HID_ST_OK : RCV_HID_ST_ENOENT);
-	async_ack_fn(ack);
+	k_mutex_unlock(&channel_completion_lock);
 }
 
 static int map_esb_channel_err(int err)
@@ -953,16 +951,20 @@ bool rcv_cmd_process_hid(const uint8_t *buf, size_t len, uint32_t usb_generation
 			status = rcv_cmd_dfu((args_len >= 1) && args[0] != 0);
 			break;
 		case RCV_HID_OP_TRACKER_CH_ALL:
+			k_mutex_lock(&channel_completion_lock, K_FOREVER);
 			status = rcv_cmd_tracker_channel_all((args_len >= 1) ? args[0] : 0);
 			if (status == RCV_HID_ST_STARTED) {
 				arm_ch_hid_completion(seq, opcode);
 			}
+			k_mutex_unlock(&channel_completion_lock);
 			break;
 		case RCV_HID_OP_TRACKER_CH_CLR:
+			k_mutex_lock(&channel_completion_lock, K_FOREVER);
 			status = rcv_cmd_tracker_channel_clear_all();
 			if (status == RCV_HID_ST_STARTED) {
 				arm_ch_hid_completion(seq, opcode);
 			}
+			k_mutex_unlock(&channel_completion_lock);
 			break;
 		default:
 			status = RCV_HID_ST_EINVAL;
