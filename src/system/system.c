@@ -350,14 +350,22 @@ void reboot_counter_write(uint8_t reboot_counter) {
 }
 
 // retained not implemented
-void sys_write(uint16_t id, void* retained_ptr, const void* data, size_t len) {
-	sys_nvs_init();
-	int err = nvs_write(&fs, id, data, len);
-	if (err < 0)
-	{
-		LOG_ERR("Failed to write to NVS, error: %d", err);
-		return;
+int sys_write_checked(uint16_t id, const void *data, size_t len)
+{
+	if (sys_nvs_init()) {
+		return -EIO;
 	}
+	int err = nvs_write(&fs, id, data, len);
+	if (err < 0) {
+		LOG_ERR("Failed to write to NVS, error: %d", err);
+		return err;
+	}
+	return 0;
+}
+
+void sys_write(uint16_t id, void *retained_ptr, const void *data, size_t len)
+{
+	(void)sys_write_checked(id, data, len);
 }
 
 // reading from nvs

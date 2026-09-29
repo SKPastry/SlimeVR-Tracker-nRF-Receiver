@@ -37,6 +37,13 @@
 // Reference table for channel picking (see esb.c for the array itself).
 bool esb_channel_is_allowed(uint8_t channel);
 
+/* Deliberate long RX blackout boundary only. Caller owns radio and has
+ * quiesced reception. No pre-boundary FIFO data may be delivered: pending
+ * entries must remain inaccessible and be discarded before RX resumes.
+ * Reanchors ordinary packets and invalidates loss windows, preserving totals
+ * and the TDMA cap. Never call for short home beacons/automatic scan steps. */
+void esb_rx_discontinuity(void);
+
 /* ---------------------------------------------------------------------------
  * RF channel storage encoding (NVS byte). User-facing channel is 0-100.
  *   0xFF -> default channel;  0 -> invalid/legacy -> default;
@@ -130,6 +137,8 @@ static inline uint8_t esb_rf_channel_decode(uint8_t stored)
 void event_handler(struct esb_evt const *event);
 int clocks_start(void);
 int esb_initialize(bool);
+/* Internal background transactions suppress only routine initialization INFO. */
+int esb_initialize_quiet(bool tx);
 void esb_deinitialize(void);
 
 void esb_set_addr_discovery(void);
@@ -150,6 +159,36 @@ void esb_print_health_snapshot(void);
 #endif
 
 void esb_reset_all_stats(void);
+
+/* Cumulative normal/pose-composite sequence evidence, not lifetime loss or
+ * status bytes. PING/raw/duplicate/out-of-order traffic adds no receipts. */
+#define ESB_AUTO_LOSS_TRACKERS 16
+struct esb_auto_loss_snapshot {
+	struct {
+		uint32_t received;
+		uint32_t gaps;
+		uint32_t restarts;
+	} tracker[ESB_AUTO_LOSS_TRACKERS];
+	uint32_t active_mask;
+	uint32_t reset_epoch;
+	/* Readiness means an accepted normal anchor, NOT acknowledged layout adoption. */
+	uint32_t ready_mask;
+	uint8_t layout_epoch;
+	bool cap_pending;
+	uint8_t home;
+	bool eligible;
+};
+void esb_get_auto_loss_snapshot(struct esb_auto_loss_snapshot *out);
+/* Invalidate evidence at excluded-session admission, including short sessions
+ * wholly between worker samples. Not for routine HOME beacons/auto scans. */
+void esb_auto_loss_invalidate(void);
+/* Fence only the next decision edge per tracker; preserve decoder anchors,
+ * readiness and window epoch. Call after actual RX quiescence. */
+void esb_auto_loss_fence(void);
+/* Establish a common decision baseline after all required streams returned.
+ * The next edge of every stream is anchor-only, including an early returner
+ * whose last packet predates this baseline. Snapshot and fence are atomic. */
+void esb_auto_loss_rebase(struct esb_auto_loss_snapshot *out);
 void esb_write_sync(uint16_t led_clock);
 void esb_receive(void);
 
@@ -180,11 +219,11 @@ uint32_t esb_send_remote_command_sens_auto_all(uint8_t axis, uint16_t revolution
 /* Queue a metadata repair request without replacing an existing control flag.
  * mask selects metadata sections; chunk selects a dense tcal block (0..254) or all (255). */
 bool esb_request_metadata(uint8_t tracker_id, uint8_t mask, uint8_t chunk);
-/* Returns 0 if started, -EINVAL bad channel, -EBUSY if another change pending. */
+/* Nonblocking fixed announcement then home commit; -EBUSY for radio/transfer conflicts. */
 int esb_set_all_trackers_channel(uint8_t channel);
 int esb_clear_all_trackers_channel(void);
 
-/* Optional: called once when tracker channel change finishes or times out. */
+/* Called once after receiver RF + persistence commit (not tracker execution proof). */
 typedef void (*esb_channel_change_done_cb_t)(bool success);
 void esb_set_channel_change_done_cb(esb_channel_change_done_cb_t cb);
 
@@ -193,8 +232,22 @@ typedef void (*esb_remote_confirm_cb_t)(uint8_t tracker_id, uint8_t flag);
 void esb_set_remote_confirm_cb(esb_remote_confirm_cb_t cb);
 
 // Local receiver channel management
-void esb_set_receiver_channel(uint8_t channel); // Set receiver RF channel only (local)
-void esb_clear_receiver_channel(void);          // Clear receiver RF channel (restore default, local)
+int esb_set_receiver_channel(uint8_t channel); // Set local home, errno on failure
+int esb_clear_receiver_channel(void);         // Restore default local home
+/* Nonreentrant radio gate. Begin/end do not stop/restore hardware. Active transfer
+ * predicates retain exclusion after their admission owner releases this gate. */
+bool esb_channel_is_busy(void);
+int esb_radio_operation_begin(void);
+int esb_radio_collection_begin(void); /* Admission for replacing an existing raw session */
+void esb_radio_operation_end(void);
+int esb_radio_operation_stop(void);
+/* Owner-held checked PTX/PRX teardown. Failure latches the radio owner fault. */
+int esb_radio_quiesce(void);
+/* Owner-held, after operation_stop: DPL NoACK pipe 0 on current home.
+ * Always quiesces PTX; caller must restore PRX before releasing the owner. */
+int esb_home_beacon_send(const uint8_t frame[16]);
+bool esb_pairing_is_active(void);
+int esb_auto_channel_request(uint8_t channel, uint8_t expected_home, uint32_t generation);
 uint8_t esb_get_receiver_channel(void);         // Get current receiver RF channel (returns 0xFF if default)
 
 // Convenience wrappers for specific commands

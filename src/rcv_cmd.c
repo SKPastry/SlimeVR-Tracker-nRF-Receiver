@@ -161,18 +161,23 @@ uint8_t rcv_cmd_channel_set(uint8_t channel)
 	if (channel > 100) {
 		return RCV_HID_ST_EINVAL;
 	}
-	esb_set_receiver_channel(channel);
-	return RCV_HID_ST_OK;
+	int err = esb_set_receiver_channel(channel);
+	return err == 0 ? RCV_HID_ST_OK :
+		err == -EBUSY ? RCV_HID_ST_EBUSY : RCV_HID_ST_ENOENT;
 }
 
 uint8_t rcv_cmd_channel_clear(void)
 {
-	esb_clear_receiver_channel();
-	return RCV_HID_ST_OK;
+	int err = esb_clear_receiver_channel();
+	return err == 0 ? RCV_HID_ST_OK :
+		err == -EBUSY ? RCV_HID_ST_EBUSY : RCV_HID_ST_ENOENT;
 }
 
 uint8_t rcv_cmd_rssi_scan(void)
 {
+	if (esb_channel_is_busy()) {
+		return RCV_HID_ST_EBUSY;
+	}
 	if (!atomic_cas(&rssi_scan_busy, 0, 1)) {
 		return RCV_HID_ST_EBUSY;
 	}
@@ -246,9 +251,14 @@ uint8_t rcv_cmd_collect_start(uint8_t tracker_id)
 	if (tracker_id >= MAX_TRACKERS) {
 		return RCV_HID_ST_EINVAL;
 	}
+	if (esb_radio_collection_begin()) {
+		return RCV_HID_ST_EBUSY;
+	}
 	rcv_cmd_collect_batch_stop();
+	rcv_cmd_collect_stop();
 	data_collect_start(tracker_id);
 	esb_send_remote_command(tracker_id, ESB_PONG_FLAG_DATA_COLLECT_ON);
+	esb_radio_operation_end();
 	return RCV_HID_ST_OK;
 #endif
 }
@@ -276,10 +286,6 @@ uint8_t rcv_cmd_collect_batch_start(uint16_t rate_hz)
 	if (rate_hz > UINT8_MAX) {
 		return RCV_HID_ST_EINVAL;
 	}
-	if (esb_ota_relay_is_active()) {
-		return RCV_HID_ST_EBUSY;
-	}
-	rcv_cmd_collect_stop();
 	uint32_t mask = 0;
 	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
 		if (stored_tracker_addr[i] != 0) {
@@ -289,12 +295,18 @@ uint8_t rcv_cmd_collect_batch_start(uint16_t rate_hz)
 	if (mask == 0) {
 		return RCV_HID_ST_ENOENT;
 	}
+	if (esb_radio_collection_begin()) {
+		return RCV_HID_ST_EBUSY;
+	}
+	rcv_cmd_collect_stop();
+	rcv_cmd_collect_batch_stop();
 	data_collect_batch_start(mask, rate_hz);
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
 		if (mask & BIT(i)) {
 			esb_send_remote_command_arg(i, ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, (uint8_t)rate_hz);
 		}
 	}
+	esb_radio_operation_end();
 	return RCV_HID_ST_OK;
 #endif
 }
@@ -498,6 +510,10 @@ static uint8_t rcv_cmd_remote_flag_hid(uint8_t seq, uint8_t opcode, uint8_t targ
 {
 	if (!rcv_hid_opcode_is_pong_flag(pong_flag)) {
 		return RCV_HID_ST_EINVAL;
+	}
+	if (pong_flag == ESB_PONG_FLAG_DATA_COLLECT_ON || pong_flag == ESB_PONG_FLAG_DATA_COLLECT_OFF ||
+	    pong_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON || pong_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF) {
+		return rcv_cmd_remote_flag(target_id, pong_flag);
 	}
 
 	uint8_t st = remote_hid_begin(seq, opcode, pong_flag);
@@ -707,7 +723,21 @@ uint8_t rcv_cmd_remote_flag(uint8_t target_id, uint8_t pong_flag)
 	if (!rcv_hid_opcode_is_pong_flag(pong_flag)) {
 		return RCV_HID_ST_EINVAL;
 	}
-	if (pong_flag == ESB_PONG_FLAG_TEST_MODE_ON || pong_flag == ESB_PONG_FLAG_TEST_MODE_OFF) {
+	if (pong_flag == ESB_PONG_FLAG_DATA_COLLECT_ON) {
+		return rcv_cmd_collect_start(target_id);
+	}
+	if (pong_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
+		/* Batch admission needs its explicit rate-bearing API. */
+		return RCV_HID_ST_EINVAL;
+	}
+	if (pong_flag == ESB_PONG_FLAG_DATA_COLLECT_OFF) {
+		return rcv_cmd_collect_stop();
+	}
+	if (pong_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF) {
+		return rcv_cmd_collect_batch_stop();
+	}
+	if (pong_flag == ESB_PONG_FLAG_SET_CHANNEL || pong_flag == ESB_PONG_FLAG_CLEAR_CHANNEL ||
+	    pong_flag == ESB_PONG_FLAG_TEST_MODE_ON || pong_flag == ESB_PONG_FLAG_TEST_MODE_OFF) {
 		/* Test flags carry TPS state; the generic path would keep a stale
 		 * rate. Callers must use rcv_cmd_remote_test_on/off. */
 		return RCV_HID_ST_EINVAL;

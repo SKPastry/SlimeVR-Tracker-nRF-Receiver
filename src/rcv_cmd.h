@@ -38,7 +38,8 @@ uint8_t rcv_cmd_tracker_channel_all(uint8_t channel);
 uint8_t rcv_cmd_tracker_channel_clear_all(void);
 
 /* Queue ESB PONG remote flag. target_id RCV_HID_TARGET_ALL = all active.
- * TEST_MODE_ON/OFF are rejected here; use the test-specific helpers below. */
+ * Channel/test flags require their typed APIs. Raw ON/OFF use collection
+ * admission; batch ON requires the rate-bearing batch API. */
 uint8_t rcv_cmd_remote_flag(uint8_t target_id, uint8_t pong_flag);
 /* Queue TEST_MODE_ON with optional target TPS (0 = tracker default). */
 uint8_t rcv_cmd_remote_test_on(uint8_t target_id, uint16_t tps);

@@ -33,6 +33,7 @@
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/sys/util.h>
 #include "connection/esb.h"
+#include "connection/auto_channel.h"
 #include "console_send.h"
 #include "data_collect.h"
 #include "esb_ota.h"
@@ -121,6 +122,109 @@ static void print_meow(void)
 	printk("%s%s%s\n", meows[meow], meow_punctuations[punctuation], meow_suffixes[suffix]);
 }
 
+static void print_channelauto_exclusions(uint64_t excluded)
+{
+	bool any = false;
+	for (unsigned ch = 0; ch <= 88; ch += 2) {
+		if ((excluded & (UINT64_C(1) << (ch / 2))) != 0) {
+			printk(" %u", ch);
+			any = true;
+		}
+	}
+	if (!any) {
+		printk(" none observed");
+	}
+	printk("\n");
+}
+
+static void print_channelauto_energy(const char *name,
+				    const struct auto_channel_energy_status *energy)
+{
+	printk("  %s: ", name);
+	if (energy->peak < 0 || energy->quiet_floor < 0) {
+		printk("invalid");
+	} else {
+		printk("peak=-%d dBm quiet-floor=-%d dBm",
+		       energy->peak, energy->quiet_floor);
+	}
+	printk(" dwell-lower-bound=%u us samples=%u clean-visits=%u attempts=%u\n",
+	       (unsigned)energy->coverage_us, (unsigned)energy->samples,
+	       (unsigned)energy->visits, (unsigned)energy->attempts);
+}
+
+static void print_channelauto_status(void)
+{
+	/* Only the console thread formats this bounded copy; keep it off its stack. */
+	static struct auto_channel_snapshot snapshot;
+	auto_channel_get_snapshot(&snapshot);
+	const char *state = !snapshot.initialized ? "uninitialized/Kconfig-disabled" :
+		snapshot.radio_fault ? "radio fault" :
+		snapshot.entropy_fault ? "entropy fault" :
+		snapshot.interference_latched ? "interference-stopped" :
+		snapshot.enabled ? "active" : "off/pinned";
+	printk("Automatic channel avoidance: %s (snapshot at %lld ms)\n",
+	       state, (long long)snapshot.now_ms);
+	printk("  Receiver %02X%02X%02X%02X%02X%02X HOME=%u generation=%u phase=%s\n",
+	       snapshot.identity[5], snapshot.identity[4], snapshot.identity[3],
+	       snapshot.identity[2], snapshot.identity[1], snapshot.identity[0],
+	       snapshot.home, (unsigned)snapshot.generation,
+	       snapshot.phase ? snapshot.phase : "unavailable");
+	printk("  Recovery required=0x%08X ready=0x%08X recovered=0x%08X missing=0x%08X layout-epoch=%u cap-pending=%s\n",
+	       (unsigned)snapshot.required_mask, (unsigned)snapshot.ready_mask,
+	       (unsigned)snapshot.recovered_mask,
+	       (unsigned)(snapshot.required_mask & ~snapshot.recovered_mask),
+	       snapshot.layout_epoch, snapshot.cap_pending ? "yes" : "no");
+	if (!snapshot.initialized || !snapshot.enabled || snapshot.interference_latched ||
+	    snapshot.radio_fault || snapshot.entropy_fault || snapshot.pairing) {
+		printk("  Broadcast blocked:%s%s%s%s%s%s\n",
+		       !snapshot.initialized ? " uninitialized/Kconfig-disabled" : "",
+		       !snapshot.enabled ? " auto-off/manual-pin" : "",
+		       snapshot.interference_latched ? " interference-stop" : "",
+		       snapshot.radio_fault ? " radio-fault" : "",
+		       snapshot.entropy_fault ? " entropy-fault" : "",
+		       snapshot.pairing ? " pairing" : "");
+	} else {
+		printk("  HOME-only broadcasts eligible; radio busy may defer them.\n");
+	}
+	printk("  Beacon TX attempts=%u local-completions=%u; delivery unknown (no ACK).\n",
+	       (unsigned)snapshot.tx_attempts, (unsigned)snapshot.tx_completed);
+	unsigned fresh = 0;
+	for (unsigned i = 0; i < snapshot.peer_count; i++) {
+		const struct auto_channel_peer_status *peer = &snapshot.peers[i];
+		int64_t age = snapshot.now_ms - peer->last_seen_ms;
+		fresh += peer->fresh;
+		printk("  Peer %02X%02X%02X%02X%02X%02X HOME=%u age=%lld ms observations=%u seq=%u %s\n",
+		       peer->identity[5], peer->identity[4], peer->identity[3],
+		       peer->identity[2], peer->identity[1], peer->identity[0],
+		       peer->home, (long long)age, peer->observations, peer->sequence,
+		       peer->fresh ? "fresh" : "expired");
+	}
+	if (!fresh) {
+		printk("  No fresh peers observed on this HOME; other channels unknown, not vacant.\n");
+	} else {
+		printk("  Other channels remain unknown; HOME beacons do not discover them.\n");
+	}
+	printk("  Current peer exclusions (even channels):");
+	print_channelauto_exclusions(snapshot.excluded);
+	if (snapshot.table_full) {
+		printk("  Fresh peer table full: automatic destinations vetoed.\n");
+	}
+	if (snapshot.decision.valid) {
+		const struct auto_channel_decision_status *decision = &snapshot.decision;
+		printk("  Last decision: %s age=%lld ms HOME=%u target=%u generation=%u\n",
+		       decision->reason ? decision->reason : "unavailable",
+		       (long long)(snapshot.now_ms - decision->time_ms),
+		       decision->home, decision->target, (unsigned)decision->generation);
+		print_channelauto_energy("HOME evidence", &decision->reference);
+		print_channelauto_energy("candidate evidence", &decision->candidate);
+		printk("  Decision-time peer exclusions:");
+		print_channelauto_exclusions(decision->excluded);
+	} else {
+		printk("  No completed energy decision in this HOME/generation.\n");
+	}
+	printk("  Moves use local loss and energy evidence, not identity-based turn-taking.\n");
+}
+
 static void print_help(void)
 {
 	printk(
@@ -160,6 +264,8 @@ static void print_help(void)
 		"  channel <0-100>            Set receiver RF channel only\n"
 		"    Example: channel 25       Set receiver to channel 25\n"
 		"  clearchannel               Clear receiver RF channel (use default)\n"
+		"  channelauto <on|off|status> Runtime automatic channel avoidance (off after every reboot)\n"
+		"    Manual channel changes disable avoidance; use channelauto on to enable explicitly\n"
 		"\n"
 	);
 
@@ -816,6 +922,7 @@ static void console_thread(void)
 	const char command_resetstats[] = "resetstats";
 	const char command_channel[] = "channel";
 	const char command_clearchannel[] = "clearchannel";
+	const char command_channelauto[] = "channelauto";
 	const char command_rssi_scan[] = "rssi_scan";
 	const char command_send[] = "send";
 	const char command_help[] = "help";
@@ -948,6 +1055,16 @@ static void console_thread(void)
 			}
 		} else if (strcmp(argv[0], command_resetstats) == 0) {
 			rcv_cmd_resetstats();
+		} else if (strcmp(argv[0], command_channelauto) == 0) {
+			if (arg2 || (arg && strcmp(arg, "on") != 0 &&
+				     strcmp(arg, "off") != 0 && strcmp(arg, "status") != 0)) {
+				printk("Usage: channelauto <on|off|status>\n");
+			} else {
+				if (arg && strcmp(arg, "status") != 0) {
+					auto_channel_set_enabled(strcmp(arg, "on") == 0);
+				}
+				print_channelauto_status();
+			}
 		} else if (strcmp(argv[0], command_rssi_scan) == 0) {
 			/* Same busy gate as HID; avoids concurrent esb_deinitialize. */
 			uint8_t st = rcv_cmd_rssi_scan();
@@ -968,11 +1085,17 @@ static void console_thread(void)
 					printk("Invalid channel. Must be a number between 0 and 100.\n");
 				} else if (rcv_cmd_channel_set((uint8_t)channel) == RCV_HID_ST_OK) {
 					printk("Receiver RF channel set to %d (local only)\n", (int)channel);
+				} else {
+					printk("Receiver RF channel change failed or radio is busy\n");
 				}
 			}
 		} else if (strcmp(argv[0], command_clearchannel) == 0) {
-			rcv_cmd_channel_clear();
-			printk("Receiver RF channel cleared (local only)\n");
+			uint8_t st = rcv_cmd_channel_clear();
+			if (st == RCV_HID_ST_OK) {
+				printk("Receiver RF channel cleared (local only)\n");
+			} else {
+				printk("Receiver RF channel clear failed (status %u)\n", st);
+			}
 		} else if (strcmp(argv[0], command_send) == 0) {
 			console_handle_send(arg, arg2, arg3, arg4, arg5);
 		}

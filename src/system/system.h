@@ -16,6 +16,7 @@ uint8_t reboot_counter_read(void);
 void reboot_counter_write(uint8_t reboot_counter);
 
 void sys_write(uint16_t id, void* ptr, const void* data, size_t len);
+int sys_write_checked(uint16_t id, const void *data, size_t len);
 void sys_read(uint16_t id, void* data, size_t len);
 
 bool button_read(void);

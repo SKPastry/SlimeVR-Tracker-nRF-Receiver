@@ -10,6 +10,7 @@
 
 #include "receiver_ota.h"
 #include "esb_ota.h"
+#include "connection/esb.h"
 #include "hid.h"
 #include "build_defines.h"
 #include "thread_priority.h"
@@ -226,9 +227,20 @@ void receiver_ota_process_hid(const uint8_t *data, size_t len)
 	case HID_OTA_QUERY_INFO:
 		rcv_ota_send_fw_info();
 		break;
-	case HID_OTA_BEGIN:
+	case HID_OTA_BEGIN: {
+		bool acquired_radio = !receiver_ota_is_active();
+		if (acquired_radio && esb_radio_operation_begin()) {
+			LOG_WRN("Receiver OTA BEGIN deferred: radio operation busy");
+			rcv_ota_send_status();
+			break;
+		}
+		esb_auto_loss_invalidate();
 		rcv_ota_handle_begin(data, len);
+		if (acquired_radio) {
+			esb_radio_operation_end();
+		}
 		break;
+	}
 	case HID_OTA_DATA:
 		rcv_ota_handle_data(data, len);
 		break;

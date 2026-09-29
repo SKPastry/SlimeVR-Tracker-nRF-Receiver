@@ -24,6 +24,15 @@ CASES = (
     'sequence-wrap',
     'pending-publication',
     'excluded-modes',
+    'auto-snapshot',
+    'sequence-lifetime',
+    'blackout-reanchor',
+    'blackout-loss-evidence',
+    'decision-common-boundary',
+    'decision-short-boundary',
+    'decision-layout-boundary',
+    'decision-pending-membership',
+    'decision-genuine-loss',
 )
 
 
@@ -53,7 +62,7 @@ def function(source, name, optional=False):
     raise ValueError(f'Missing production function: {name}')
 
 
-def production_bodies(source):
+def production_bodies(source, header=''):
     # Keep the selected tree's constants and state names together. Older trees
     # use *_WINDOWS / *_window_*; current code uses *_TICKS / *_pool_*.
     constants_start = source.index('static const uint16_t tdma_cap_ladder')
@@ -64,6 +73,10 @@ def production_bodies(source):
         r'tdma_(?:cap_level|published_cap_level|loss_\w+|prev_\w+)[^;]*;',
         source,
         re.MULTILINE,
+    ))
+    declarations += '\n' + '\n'.join(re.findall(
+        r'^static (?:uint32_t|bool) (?:decision_\w+|tdma_decision_ready)[^;]*;',
+        source, re.MULTILINE,
     ))
     structure_start = re.search(r'\bstruct\s+packet_stats\s*\{', source)
     if structure_start is None:
@@ -83,7 +96,27 @@ def production_bodies(source):
         restart,
         '}',
     ))
+    snapshot = ''
+    if header and 'struct esb_auto_loss_snapshot' in header:
+        snapshot = '#define ESB_AUTO_LOSS_TRACKERS 16\n'
+        snapshot += block(header, header.index('struct esb_auto_loss_snapshot')) + ';\n'
+        snapshot += function(header, 'esb_rf_channel_decode')
+        snapshot += function(source, 'esb_auto_loss_fence', optional=True)
+        snapshot += function(source, 'decision_accept', optional=True)
+        snapshot += function(source, 'esb_auto_loss_invalidate')
+        snapshot += function(source, 'esb_get_auto_loss_snapshot')
+        snapshot += function(source, 'esb_rx_discontinuity')
+        snapshot += function(source, 'esb_auto_loss_rebase', optional=True)
+        snapshot += function(source, 'esb_reset_tracker_sequence')
+        snapshot += function(source, 'esb_reset_all_stats')
 
+    admission = ''
+    for name, marker in (('normal_admit', 'uint8_t received_sequence = rx_payload.data[16];'),
+                         ('composite_admit', 'uint8_t received_sequence = rx_payload.data[rx_payload.length - 1];')):
+        start = source.index(marker)
+        end = source.index('if (seq_result == 3', start)
+        admission += (f'\nstatic bool {name}(uint8_t tracker_id, struct payload rx_payload) {{\n'
+                      'do {\n' + source[start:end] + 'return true;\n} while (0);\nreturn false;\n}\n')
     return '\n'.join((
         constants,
         declarations,
@@ -91,9 +124,15 @@ def production_bodies(source):
         'static struct packet_stats tracker_stats[MAX_TRACKERS];',
         # The pre-recovery-fix baseline has no shared reset helper.
         function(source, 'tdma_loss_reset_windows', optional=True),
+        snapshot,
+        function(source, 'tdma_loss_controller_update'),
         function(source, 'tdma_loss_controller_tick'),
         function(source, 'check_packet_sequence'),
         restart_wrapper,
+        function(source, 'tdma_pack_config'),
+        function(source, 'tdma_slot_ticks_for'),
+        function(source, 'tdma_recalculate'),
+        admission,
     ))
 
 
@@ -112,13 +151,14 @@ def parse_args():
 def main():
     args = parse_args()
     source = (args.source_root / 'src/connection/esb.c').read_text()
+    header = (args.source_root / 'src/connection/esb.h').read_text()
     fixture = Path(__file__).with_name('fixture.c').read_text()
     prelude, scenarios = fixture.split('/* PRODUCTION BODIES */')
 
     with tempfile.TemporaryDirectory(prefix='receiver-tdma-loss-') as directory:
         path = Path(directory)
         generated = path / 'test.c'
-        generated.write_text(prelude + production_bodies(source) + scenarios)
+        generated.write_text(prelude + production_bodies(source, header) + scenarios)
         binary = path / 'test'
         compiler = shlex.split(os.environ.get('CC', 'cc'))
         flags = [

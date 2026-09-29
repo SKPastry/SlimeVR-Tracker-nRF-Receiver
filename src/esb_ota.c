@@ -368,6 +368,15 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 			LOG_ERR("OTA: Max parallel targets (%d) reached", OTA_MAX_PARALLEL);
 			break;
 		}
+		bool acquired_radio = false;
+		if (!ota_relay.active) {
+			if (esb_radio_operation_begin()) {
+				LOG_WRN("OTA BEGIN deferred: radio operation busy");
+				break;
+			}
+			acquired_radio = true;
+			esb_auto_loss_invalidate();
+		}
 		/* An accepted BEGIN starts a new command epoch for this tracker. */
 		unsigned int begin_key = irq_lock();
 		ota_abort_expiry_ticks[tracker_id] = 0;
@@ -443,6 +452,9 @@ void esb_ota_relay_process_hid(const uint8_t *data, size_t len)
 		t->pending_cmd_send_count = 0;
 		__DMB();
 		t->pending_cmd_type = ESB_OTA_BEGIN_TYPE;
+		if (acquired_radio) {
+			esb_radio_operation_end();
+		}
 
 		LOG_INF("OTA: Session active with %u target(s)", ota_relay.num_targets);
 		break;

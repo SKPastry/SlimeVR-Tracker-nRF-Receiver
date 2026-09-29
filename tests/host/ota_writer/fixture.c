@@ -40,6 +40,14 @@ typedef atomic_int atomic_t;
 #define atomic_get(a) atomic_load(a)
 #define atomic_set(a,v) atomic_store(a,v)
 #define atomic_clear(a) atomic_store(a,0)
+static bool radio_owned;
+static int esb_radio_operation_begin(void) {
+    if (radio_owned) return -EBUSY;
+    radio_owned = true;
+    return 0;
+}
+static void esb_radio_operation_end(void) { assert(radio_owned); radio_owned = false; }
+static void esb_auto_loss_invalidate(void) {}
 struct device { int unused; } device;
 #define DEVICE_DT_GET(x) (&device)
 static bool device_is_ready(const struct device *d) { return true; }
