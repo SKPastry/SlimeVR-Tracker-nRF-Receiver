@@ -52,13 +52,14 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 		printk("Examples:\n");
 		printk("  send 0 shutdown      - Shutdown tracker 0\n");
 		printk("  send all shutdown    - Shutdown all active trackers\n");
-		printk("  send 1 calibrate     - Calibrate tracker 1\n");
+		printk("  send 1 calibrate     - Zero-bias calibration on tracker 1\n");
+		printk("  send 1 calibrate acc - Accelerometer calibration (18 orientations)\n");
 		printk("  send all meow        - Make all active trackers meow\n");
 		printk("  send 2 reboot        - Reboot tracker 2\n");
 		printk("  send 3 clear         - Clear pairing on tracker 3\n");
 		printk("  send all dfu         - Enter DFU mode on all active trackers\n");
 		printk(
-			"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu, sens, "
+			"Available commands: shutdown, calibrate [acc], meow, scan, mag, reboot, clear, dfu, sens, "
 			"reset, ping, tcal, tdma, test\n"
 		);
 		return;
@@ -85,11 +86,20 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 		cmd_flag = ESB_PONG_FLAG_SHUTDOWN;
 		cmd_name = "Shutdown";
 	} else if (strcmp(arg2, "calibrate") == 0) {
-		cmd_flag = ESB_PONG_FLAG_CALIBRATE;
-		cmd_name = "Calibrate";
+		if (arg4 || arg5 || (arg3 && strcmp(arg3, "acc") != 0)) {
+			printk("Usage: send <id|all> calibrate [acc]\n");
+			return;
+		}
+		cmd_flag = arg3 ? ESB_PONG_FLAG_CALIBRATE_ACC : ESB_PONG_FLAG_CALIBRATE;
+		cmd_name = arg3 ? "Accelerometer calibration (18 orientations)" : "Zero-bias calibration";
 	} else if (strcmp(arg2, "6-side") == 0) {
-		cmd_flag = ESB_PONG_FLAG_SIX_SIDE_CAL;
-		cmd_name = "6-side calibration";
+		if (arg3 || arg4 || arg5) {
+			printk("Usage: send <id|all> calibrate acc\n");
+			return;
+		}
+		printk("'6-side' is the historical name; use 'calibrate acc' (18 orientations).\n");
+		cmd_flag = ESB_PONG_FLAG_CALIBRATE_ACC;
+		cmd_name = "Accelerometer calibration (18 orientations)";
 	} else if (strcmp(arg2, "meow") == 0) {
 		cmd_flag = ESB_PONG_FLAG_MEOW;
 		cmd_name = "Meow";
@@ -523,7 +533,7 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 	} else {
 		printk("Unknown command: %s\n", arg2);
 		printk(
-			"Available commands: shutdown, calibrate, 6-side, meow, scan, mag, reboot, clear, dfu [ota], "
+			"Available commands: shutdown, calibrate [acc], meow, scan, mag, reboot, clear, dfu [ota], "
 			"fusion, sens, "
 			"reset, ping, tcal, tdma, test\n"
 		);

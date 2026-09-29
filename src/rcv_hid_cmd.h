@@ -102,7 +102,7 @@ static inline bool rcv_hid_opcode_is_pong_flag(uint8_t op)
 	switch (op) {
 	case ESB_PONG_FLAG_SHUTDOWN:
 	case ESB_PONG_FLAG_CALIBRATE:
-	case ESB_PONG_FLAG_SIX_SIDE_CAL:
+	case ESB_PONG_FLAG_CALIBRATE_ACC:
 	case ESB_PONG_FLAG_MEOW:
 	case ESB_PONG_FLAG_SCAN:
 	case ESB_PONG_FLAG_MAG_CLEAR:

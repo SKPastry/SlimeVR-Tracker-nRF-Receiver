@@ -20,8 +20,31 @@ uint8_t rcv_cmd_remote_sens_auto(uint8_t target, uint8_t axis, uint16_t rev) { a
 uint8_t rcv_cmd_remote_test_on(uint8_t target, uint16_t tps) { assert(false); return 0; }
 uint8_t rcv_cmd_remote_test_off(uint8_t target) { assert(false); return 0; }
 
+static void test_calibration_commands(void)
+{
+    char *targets[] = {"0", "7", "all"};
+    for (unsigned i = 0; i < 3; i++) {
+        uint8_t target = i == 2 ? RCV_HID_TARGET_ALL : (i == 1 ? 7 : 0);
+        requests = 0;
+        console_handle_send(targets[i], "calibrate", NULL, NULL, NULL);
+        assert(requests == 1 && last_target == target && last_flag == 0x02);
+        console_handle_send(targets[i], "calibrate", "acc", NULL, NULL);
+        assert(requests == 2 && last_target == target && last_flag == 0x03);
+        console_handle_send(targets[i], "6-side", NULL, NULL, NULL);
+        assert(requests == 3 && last_target == target && last_flag == 0x03);
+
+        console_handle_send(targets[i], "calibrate", "gyro", NULL, NULL);
+        console_handle_send(targets[i], "calibrate", "acc", "extra", NULL);
+        console_handle_send(targets[i], "calibrate", "acc", "extra", "more");
+        console_handle_send(targets[i], "6-side", "extra", NULL, NULL);
+        assert(requests == 3);
+    }
+    puts("console: calibration aliases select existing wire operations; invalid args never queue");
+}
+
 int main(void)
 {
+    test_calibration_commands();
     char *targets[] = {"0", "all"};
     for (unsigned i = 0; i < 2; i++) {
         requests = 0;

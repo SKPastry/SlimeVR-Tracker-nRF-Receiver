@@ -182,7 +182,7 @@ def parse_kind_mask(text: str) -> int:
 PONG_FLAG = {
     "shutdown": 0x01,
     "calibrate": 0x02,
-    "6-side": 0x03,
+    "calibrate-acc": 0x03,
     "meow": 0x04,
     "scan": 0x05,
     "mag-clear": 0x06,
@@ -434,6 +434,20 @@ def build_send(target: str, tokens: list[str]) -> tuple[int, bytes]:
     cmd = tokens[0]
     rest = tokens[1:]
 
+    if cmd == "calibrate":
+        if not rest:
+            return PONG_FLAG["calibrate"], bytes([tid])
+        if rest == ["acc"]:
+            return PONG_FLAG["calibrate-acc"], bytes([tid])
+        raise ValueError("Usage: send <id|all> calibrate [acc]")
+
+    if cmd == "6-side":
+        if rest:
+            raise ValueError("Usage: send <id|all> calibrate acc")
+        print("'6-side' is the historical name; use 'calibrate acc' (18 orientations).",
+              file=sys.stderr)
+        return PONG_FLAG["calibrate-acc"], bytes([tid])
+
     # Compound: mag …
     if cmd == "mag":
         if not rest:
@@ -573,10 +587,10 @@ def build_send(target: str, tokens: list[str]) -> tuple[int, bytes]:
             raise ValueError("Usage: send <id|all> tcal-heat-start (no arguments)")
         return PONG_FLAG[cmd], bytes([tid])
 
-    # fusion as alias already in map; 6-side etc.
+    # fusion and other flat aliases are already in the map.
     raise ValueError(
         f"Unknown remote command: {cmd}\n"
-        "See: shutdown calibrate 6-side meow scan mag reboot clear dfu fusion sens "
+        "See: shutdown calibrate [acc] meow scan mag reboot clear dfu fusion sens "
         "reset ping tcal tdma test collect-on/off ota-* raw <op>"
     )
 
@@ -959,7 +973,7 @@ def main() -> int:
             "  send all mag auto off\n"
             "  send 0 sens 1.0,1.0,1.0\n"
             "  send 0 sens auto z 5\n"
-            "  send --watch-calibration 0 calibrate\n"
+            "  send --watch-calibration 0 calibrate acc  # accelerometer, 18 orientations\n"
             "  events-watch all --kinds calibration,tracker-rest,fusion-rest,power,button\n"
             "  events-watch all --out capture.jsonl\n"
             "  events-watch all --no-log\n"
@@ -1138,11 +1152,11 @@ def main() -> int:
             opcode, payload = build_send(args.target, tokens)
             if args.watch_calibration:
                 calibration_kinds = {
-                    PONG_FLAG["calibrate"]: 1, PONG_FLAG["6-side"]: 2,
+                    PONG_FLAG["calibrate"]: 1, PONG_FLAG["calibrate-acc"]: 2,
                     PONG_FLAG["mag-cal"]: 3, PONG_FLAG["sens-auto"]: 5,
                 }
                 if opcode not in calibration_kinds or tokens[0] == "raw":
-                    raise ValueError("--watch-calibration requires calibrate, 6-side, mag cal, "
+                    raise ValueError("--watch-calibration requires calibrate [acc], mag cal, "
                                      "sens auto, or their flat aliases")
                 return watch_events(client, parse_target(args.target), 1,
                                     (opcode, payload), calibration_kinds[opcode])

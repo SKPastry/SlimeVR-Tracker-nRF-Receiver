@@ -3588,8 +3588,8 @@ static const char *esb_pong_flag_name(uint8_t flag)
 		return "SHUTDOWN";
 	case ESB_PONG_FLAG_CALIBRATE:
 		return "CALIBRATE";
-	case ESB_PONG_FLAG_SIX_SIDE_CAL:
-		return "SIX_SIDE_CAL";
+	case ESB_PONG_FLAG_CALIBRATE_ACC:
+		return "CALIBRATE_ACC";
 	case ESB_PONG_FLAG_MEOW:
 		return "MEOW";
 	case ESB_PONG_FLAG_SCAN:

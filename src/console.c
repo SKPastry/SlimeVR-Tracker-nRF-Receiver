@@ -278,17 +278,20 @@ static void print_help(void)
 	printk(
 		"Remote Commands:\n"
 		"  send <id|all> <command>    Send remote command to tracker(s)\n"
-		"    Commands: shutdown, calibrate, 6-side, meow, scan,\n"
+		"    Commands: shutdown, calibrate [acc], meow, scan,\n"
 		"              mag <on|off|clear|cal|auto on|auto off>, reboot, clear, dfu [ota],\n"
 		"              channel <0-100>, clearchannel,\n"
 		"              sens <x,y,z|reset|auto <x|y|z> [rev]>,\n"
 		"              reset <zro|acc|bat|mag|tcal|fusion>, ping\n"
+		"    calibrate: zero-bias; calibrate acc: accelerometer (18 orientations)\n"
+		"    6-side: historical alias for calibrate acc\n"
 	);
 
 	printk(
 		"    Examples:\n"
 		"      send 0 shutdown          Shutdown tracker 0\n"
-		"      send all calibrate       Calibrate all active trackers\n"
+		"      send all calibrate       Zero-bias calibration on all active trackers\n"
+		"      send 0 calibrate acc     Accelerometer calibration (18 orientations)\n"
 		"      send 1 meow              Make tracker 1 meow\n"
 		"      send 2 reboot            Reboot tracker 2\n"
 		"      send 0 sens 1.0,1.0,1.0  Set sensitivity for tracker 0\n"
