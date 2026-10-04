@@ -252,14 +252,16 @@ static void tdma_shadow_observe(uint8_t tracker_id, enum tdma_shadow_evidence ev
 		return;
 	}
 
-	/* Encode uptime+1 so zero remains the never-observed sentinel. */
-	atomic_set(&tdma_shadow_last_seen_ms[tracker_id], (atomic_val_t)(k_uptime_get_32() + 1U));
+	/* Validity lives in the evidence mask: every uint32 timestamp is valid. */
+	unsigned int key = irq_lock();
+	atomic_set(&tdma_shadow_last_seen_ms[tracker_id], (atomic_val_t)k_uptime_get_32());
 	if (evidence == TDMA_SHADOW_EVIDENCE_PING) {
 		atomic_or(&tdma_shadow_ever_ping_mask, BIT(tracker_id));
 	} else {
 		atomic_or(&tdma_shadow_ever_data_mask, BIT(tracker_id));
 	}
 	atomic_or(&tdma_shadow_live_evidence_mask, BIT(tracker_id));
+	irq_unlock(key);
 }
 
 static void tdma_shadow_forget_tracker(uint8_t tracker_id)
@@ -281,38 +283,27 @@ static void tdma_shadow_forget_tracker(uint8_t tracker_id)
 
 static void tdma_shadow_update(uint32_t now_ms)
 {
+	unsigned int key = irq_lock();
 	uint8_t tracker_count = MIN(stored_trackers, MAX_TRACKERS);
 	uint32_t stored_mask = tracker_count > 0 ? BIT(tracker_count) - 1U : 0;
 	uint32_t evidence_mask = (uint32_t)atomic_get(&tdma_shadow_live_evidence_mask) & stored_mask;
 	uint32_t desired_mask = (uint32_t)atomic_get(&tdma_shadow_desired_mask) & stored_mask;
+	uint32_t previous_join_mask = (uint32_t)atomic_get(&tdma_shadow_pending_join_mask);
 	uint32_t pending_join_mask = 0;
 	uint32_t pending_leave_mask = 0;
+	uint32_t evicted_mask = 0;
 
 	for (uint8_t i = 0; i < tracker_count; i++) {
 		uint32_t bit = BIT(i);
-		uint32_t last_seen_encoded = (uint32_t)atomic_get(&tdma_shadow_last_seen_ms[i]);
-		bool has_evidence = (evidence_mask & bit) != 0 && last_seen_encoded != 0;
-		/* Signed arithmetic + clamp: observe() runs in the EVENT thread while
-		 * this update runs in the stats thread, so last_seen can legitimately be
-		 * 1 ms AHEAD of our `now_ms` sample. Unsigned subtraction turned that
-		 * harmless -1 into 4.29e9 ms, instantly exceeding the leave grace and
-		 * evicting a tracker that had sent a packet one millisecond ago. */
-		int64_t signed_age_ms = (int64_t)now_ms - ((int64_t)last_seen_encoded - 1);
-		if (signed_age_ms < 0) {
-			signed_age_ms = 0;
-		}
-		uint32_t age_ms = has_evidence ? (uint32_t)signed_age_ms : UINT32_MAX;
+		uint32_t last_seen_ms = (uint32_t)atomic_get(&tdma_shadow_last_seen_ms[i]);
+		bool has_evidence = (evidence_mask & bit) != 0;
+		/* Modular age handles wrap; a concurrently sampled future tick is fresh. */
+		int32_t signed_age_ms = (int32_t)(now_ms - last_seen_ms);
+		uint32_t age_ms = has_evidence ? (uint32_t)MAX(signed_age_ms, 0) : UINT32_MAX;
 
 		if (desired_mask & bit) {
 			if (has_evidence && age_ms >= TDMA_SHADOW_LEAVE_GRACE_MS) {
-				LOG_WRN(
-					"SHADOW evict trk=%u age_ms=%u last_seen=%u now=%u (grace=%u)",
-					i,
-					age_ms,
-					last_seen_encoded,
-					(uint32_t)now_ms,
-					TDMA_SHADOW_LEAVE_GRACE_MS
-				);
+				evicted_mask |= bit;
 				desired_mask &= ~bit;
 				atomic_and(&tdma_shadow_live_evidence_mask, (atomic_val_t)~bit);
 				atomic_set(&tdma_shadow_last_seen_ms[i], 0);
@@ -329,7 +320,7 @@ static void tdma_shadow_update(uint32_t now_ms)
 
 		pending_join_mask |= bit;
 		uint32_t join_since_ms = (uint32_t)atomic_get(&tdma_shadow_join_since_ms[i]);
-		if (join_since_ms == 0) {
+		if (!(previous_join_mask & bit)) {
 			atomic_set(&tdma_shadow_join_since_ms[i], (atomic_val_t)now_ms);
 		} else if (now_ms - join_since_ms >= TDMA_SHADOW_JOIN_CONFIRM_MS) {
 			desired_mask |= bit;
@@ -345,6 +336,11 @@ static void tdma_shadow_update(uint32_t now_ms)
 	atomic_set(&tdma_shadow_desired_mask, (atomic_val_t)desired_mask);
 	atomic_set(&tdma_shadow_pending_join_mask, (atomic_val_t)pending_join_mask);
 	atomic_set(&tdma_shadow_pending_leave_mask, (atomic_val_t)pending_leave_mask);
+	irq_unlock(key);
+	if (evicted_mask) {
+		LOG_WRN("SHADOW evict mask=0x%04x now=%u (grace=%u)",
+			(unsigned int)evicted_mask, now_ms, TDMA_SHADOW_LEAVE_GRACE_MS);
+	}
 }
 
 
