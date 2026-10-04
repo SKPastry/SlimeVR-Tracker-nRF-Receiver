@@ -368,10 +368,17 @@ void sys_write(uint16_t id, void *retained_ptr, const void *data, size_t len)
 	(void)sys_write_checked(id, data, len);
 }
 
+int sys_read_checked(uint16_t id, void *data, size_t len)
+{
+	if (sys_nvs_init()) {
+		return -EIO;
+	}
+	return nvs_read(&fs, id, data, len);
+}
+
 // reading from nvs
 void sys_read(uint16_t id, void* data, size_t len) {
-	sys_nvs_init();
-	int err = nvs_read(&fs, id, data, len);
+	int err = sys_read_checked(id, data, len);
 	if (err < 0)
 	{
 		if (err == -ENOENT) // suppress ENOENT
