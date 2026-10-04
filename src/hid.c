@@ -450,14 +450,14 @@ static uint8_t rssi_smooth_update(uint8_t tracker_id, int8_t new_rssi)
 
 	// 首次初始化，直接使用当前值
 	if (!state->initialized) {
-		state->ema_value = (int16_t)new_rssi << 8;  // 左移8位作为定点数
+		state->ema_value = (int16_t)new_rssi * 256;  // Q8 fixed point
 		state->initialized = true;
 		return (uint8_t)new_rssi;
 	}
 
 	// EMA计算: EMA = alpha * new + (1 - alpha) * old_EMA
 	// 定点数实现: EMA = (alpha * new * 256 + (256 - alpha) * old_EMA) / 256
-	int32_t new_scaled = (int32_t)new_rssi << 8;  // new * 256
+	int32_t new_scaled = (int32_t)new_rssi * 256;
 	int32_t alpha_term = (int32_t)RSSI_EMA_ALPHA * new_scaled;  // alpha * new * 256
 	int32_t beta_term = (256 - RSSI_EMA_ALPHA) * state->ema_value;  // (1-alpha) * old_EMA
 
