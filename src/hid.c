@@ -183,6 +183,7 @@ struct hid_stats_state {
 	atomic_t last_tps_time;
 	atomic_t last_report_time;
 	atomic_t had_activity;
+	atomic_t started;
 };
 
 static struct hid_stats_state hid_stats = {
@@ -242,29 +243,28 @@ static void hid_stats_record_reports(uint32_t reports)
 	if (reports == 0U)
 		return;
 
-	int64_t now = k_uptime_get();
+	uint32_t now = k_uptime_get_32();
 
-	atomic_val_t last_tps = atomic_get(&hid_stats.last_tps_time);
-	if (last_tps == 0) {
-		atomic_cas(&hid_stats.last_tps_time, 0, now);
+	if (atomic_cas(&hid_stats.started, 0, 1)) {
+		atomic_set(&hid_stats.last_tps_time, (atomic_val_t)now);
 	}
 
 	atomic_add(&hid_stats.reports_in_interval, (atomic_val_t)reports);
-	atomic_set(&hid_stats.last_report_time, now);
+	atomic_set(&hid_stats.last_report_time, (atomic_val_t)now);
 	atomic_set(&hid_stats.had_activity, 1);
 
-	last_tps = atomic_get(&hid_stats.last_tps_time);
+	uint32_t last_tps = (uint32_t)atomic_get(&hid_stats.last_tps_time);
 	if (now - last_tps >= HID_TPS_UPDATE_INTERVAL_MS) {
 		atomic_val_t interval_reports = atomic_set(&hid_stats.reports_in_interval, 0);
 		atomic_set(&hid_stats.current_tps, interval_reports);
-		atomic_set(&hid_stats.last_tps_time, now);
+		atomic_set(&hid_stats.last_tps_time, (atomic_val_t)now);
 	}
 }
 
-static void hid_stats_update_idle_if_needed(int64_t now)
+static void hid_stats_update_idle_if_needed(uint32_t now)
 {
-	atomic_val_t last_tps = atomic_get(&hid_stats.last_tps_time);
-	if (last_tps == 0) {
+	uint32_t last_tps = (uint32_t)atomic_get(&hid_stats.last_tps_time);
+	if (!atomic_get(&hid_stats.started)) {
 		return;
 	}
 
@@ -274,12 +274,12 @@ static void hid_stats_update_idle_if_needed(int64_t now)
 			atomic_set(&hid_stats.current_tps, interval_reports);
 			atomic_set(&hid_stats.reports_in_interval, 0);
 		} else {
-			atomic_val_t last_report = atomic_get(&hid_stats.last_report_time);
-			if (last_report && now - last_report >= HID_TPS_UPDATE_INTERVAL_MS) {
+			uint32_t last_report = (uint32_t)atomic_get(&hid_stats.last_report_time);
+			if (now - last_report >= HID_TPS_UPDATE_INTERVAL_MS) {
 				atomic_set(&hid_stats.current_tps, 0);
 			}
 		}
-		atomic_set(&hid_stats.last_tps_time, now);
+		atomic_set(&hid_stats.last_tps_time, (atomic_val_t)now);
 	}
 }
 
@@ -396,7 +396,7 @@ static void hid_dropped_reports_logging(void)
 		k_msleep(HID_STATS_POLL_INTERVAL_MS);
 
 		int64_t now = k_uptime_get();
-		hid_stats_update_idle_if_needed(now);
+		hid_stats_update_idle_if_needed(k_uptime_get_32());
 
 		// Only log when detailed stats are enabled
 		if (!esb_get_stats_detailed_enabled()) {
