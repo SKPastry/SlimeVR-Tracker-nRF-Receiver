@@ -248,10 +248,11 @@ static void reset_session(void)
 	}
 }
 
-static void remove_target(uint8_t tracker_id)
+/* Caller excludes the radio ISR while changing the target tuple. */
+static bool remove_target_locked(uint8_t tracker_id)
 {
 	if (tracker_id >= MAX_TRACKERS || !ota_relay.tracker[tracker_id].participating) {
-		return;
+		return false;
 	}
 	ota_relay.tracker[tracker_id].participating = false;
 
@@ -263,8 +264,38 @@ static void remove_target(uint8_t tracker_id)
 	}
 	ota_relay.num_targets = new_count;
 	if (new_count == 0) {
-		LOG_INF("OTA: Last target removed, session ended");
+		ota_relay.ring_head = 0;
 		ota_relay.active = false;
+	}
+	return new_count == 0;
+}
+
+static void remove_target(uint8_t tracker_id)
+{
+	unsigned int key = irq_lock();
+	bool ended = remove_target_locked(tracker_id);
+	irq_unlock(key);
+	if (ended) {
+		LOG_INF("OTA: Last target removed, session ended");
+		unsuppress_all_trackers();
+	}
+}
+
+void esb_ota_forget_tracker(uint8_t tracker_id)
+{
+	if (tracker_id >= MAX_TRACKERS) {
+		return;
+	}
+	unsigned int key = irq_lock();
+	bool ended = remove_target_locked(tracker_id);
+	memset(&ota_relay.tracker[tracker_id], 0, sizeof(ota_relay.tracker[tracker_id]));
+	ota_abort_valid[tracker_id] = false;
+	ota_abort_expiry_ticks[tracker_id] = 0;
+	if (fw_info_pending.pending && fw_info_pending.tracker_id == tracker_id) {
+		fw_info_pending.pending = false;
+	}
+	irq_unlock(key);
+	if (ended) {
 		unsuppress_all_trackers();
 	}
 }

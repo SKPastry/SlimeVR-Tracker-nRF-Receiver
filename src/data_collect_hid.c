@@ -408,6 +408,23 @@ void data_collect_stop(void)
 		dc_frames_received, dc_frames_sent, dc_frames_dropped);
 }
 
+void data_collect_forget_tracker(uint8_t tracker_id)
+{
+	if (tracker_id >= MAX_TRACKERS) {
+		return;
+	}
+	unsigned int key = irq_lock();
+	if (dc_target_tracker_id == tracker_id) {
+		dc_active = false;
+		dc_target_tracker_id = UINT8_MAX;
+	}
+	dc_batch_mask &= ~BIT(tracker_id);
+	dc_batch_active = dc_batch_mask != 0;
+	/* Preserve USB ownership of an in-flight report, discard queued frames. */
+	dc_reset_fifo_locked();
+	irq_unlock(key);
+}
+
 bool data_collect_is_active(void)
 {
 	return dc_active;
