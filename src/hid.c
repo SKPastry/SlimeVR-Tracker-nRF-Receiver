@@ -230,12 +230,19 @@ int64_t last_registration_sent = 0;
 //|TX   251|seq     |opcode  |status  |result---------------------------------------------------------------|
 //|RX   254|seq     |opcode  |flags   |args-----------------------------------------------------------------|
 
-static void packet_device_addr(uint8_t *report, uint16_t id) // associate id and tracker address
+static bool packet_device_addr(uint8_t *report, uint16_t id) // associate id and tracker address
 {
+	unsigned int key = irq_lock();
+	if (stored_trackers > MAX_TRACKERS || id >= stored_trackers || id >= MAX_TRACKERS) {
+		irq_unlock(key);
+		return false;
+	}
+	memcpy(&report[2], &stored_tracker_addr[id], 6);
+	irq_unlock(key);
 	report[0] = RCV_HID_TYPE_DEVICE_ADDR;
 	report[1] = id;
-	memcpy(&report[2], &stored_tracker_addr[id], 6);
 	memset(&report[8], 0, 8); // last 8 bytes unused for now
+	return true;
 }
 
 static void hid_stats_record_reports(uint32_t reports)
@@ -314,14 +321,16 @@ uint32_t hid_get_total_tracker_drop_count(uint8_t tracker_id)
 
 static void hid_fill_padding(struct tracker_report *out, uint8_t tracker_count)
 {
-	if (tracker_count > 0) {
+	if (tracker_count > 0 && tracker_count <= MAX_TRACKERS) {
 		sent_device_addr %= tracker_count;
-		packet_device_addr(out->data, sent_device_addr);
+		bool valid = packet_device_addr(out->data, sent_device_addr);
 		sent_device_addr = (sent_device_addr + 1) % tracker_count;
-	} else {
-		memset(out->data, 0, sizeof(out->data));
-		out->data[0] = 0xF8;
+		if (valid) {
+			return;
+		}
 	}
+	memset(out->data, 0, sizeof(out->data));
+	out->data[0] = 0xF8;
 }
 
 static void send_report(struct k_work *work)

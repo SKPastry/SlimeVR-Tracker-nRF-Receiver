@@ -1323,22 +1323,21 @@ static bool esb_parse_pair(const uint8_t packet[8]);
 static void process_pairing_queue(void);
 static const char *esb_pong_flag_name(uint8_t flag);
 
-// Find tracker by address without locks.
-// On single-core ARM Cortex-M, compiler barrier ensures correct ordering.
-// stored_tracker_addr[] is append-only from ISR perspective — thread writes
-// the address first, then increments count with a compiler barrier in between.
+/* ISR-safe roster snapshot; mutations publish address/count under irq_lock. */
 static inline int esb_find_tracker(uint64_t addr)
 {
 	if (addr == 0) {
 		return -1;
 	}
-	uint8_t count = stored_trackers;   // single atomic byte read on ARM
-	__asm__ volatile("" ::: "memory"); // compiler barrier: ensure count is read before array
+	unsigned int key = irq_lock();
+	uint8_t count = stored_trackers;
 	for (int i = 0; i < count && i < MAX_TRACKERS; i++) {
 		if (stored_tracker_addr[i] == addr) {
+			irq_unlock(key);
 			return i;
 		}
 	}
+	irq_unlock(key);
 	return -1;
 }
 

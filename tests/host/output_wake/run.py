@@ -73,6 +73,8 @@ static bool atomic_cas(atomic_t *a, int32_t old, int32_t v) {
 static int32_t atomic_set(atomic_t *a, int32_t v) { int32_t old=*a; *a=v; return old; }
 static int32_t atomic_add(atomic_t *a, int32_t v) { int32_t old=*a; *a+=v; return old; }
 static int32_t atomic_get(const atomic_t *a) { return *a; }
+static unsigned int irq_lock(void) { return 0; }
+static void irq_unlock(unsigned int key) { (void)key; }
 static bool atomic_test_and_set_bit(atomic_t *a, int bit) { bool old=(*a & BIT(bit))!=0; *a |= BIT(bit); return old; }
 static bool atomic_test_and_clear_bit(atomic_t *a, int bit) { bool old=(*a & BIT(bit))!=0; *a &= ~BIT(bit); return old; }
 static void atomic_clear_bit(atomic_t *a, int bit) { *a &= ~BIT(bit); }
