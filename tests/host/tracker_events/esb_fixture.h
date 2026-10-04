@@ -8,10 +8,17 @@
 #define LOG_ERR(...) ((void)0)
 #define LOG_DBG(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
+#define LOG_INF(...) ((void)0)
 typedef int atomic_val_t;
 static int atomic_get(int *v) { return *v; }
 static void atomic_and(int *v, int mask) { *v &= mask; }
 static void atomic_set(int *v, int value) { *v=value; }
+static void atomic_inc(int *v) { ++*v; }
+static int test_all_generation, test_all_enabled;
+static uint16_t test_all_requested_tps, test_all_effective_tps;
+static int tdma_shadow_desired_changed_at_ms;
+static int64_t tdma_last_reconfig_time;
+static bool tracker_store_ready;
 static int test_all_state_valid, test_all_confirmed_mask, test_all_ready_after_ms[16];
 static uint8_t stored_trackers=3;
 static uint64_t stored_tracker_addr[16];
@@ -23,6 +30,20 @@ static unsigned irq_lock(void) { return irq_depth++; }
 static void irq_unlock(unsigned key) { irq_depth=key; }
 static void k_mutex_lock(int *lock, int timeout) { (void)lock; (void)timeout; }
 static void k_mutex_unlock(int *lock) { (void)lock; }
+static int tracker_roster_save(uint8_t count, const uint64_t *addresses) {
+    assert(irq_depth==0 && count==0);
+    for (unsigned i=0; i<MAX_TRACKERS; i++) assert(addresses[i]==0);
+    return 0;
+}
+static void esb_ota_forget_tracker(uint8_t id) { assert(id<MAX_TRACKERS && irq_depth==0); }
+static void data_collect_forget_tracker(uint8_t id) { assert(id<MAX_TRACKERS && irq_depth==0); }
+static void test_all_invalidate(void) { assert(irq_depth!=0); }
+static void raw_arq_reset(void) { assert(irq_depth!=0); }
+static void tracker_slot_reset(uint8_t id) {
+    assert(irq_depth!=0 && id<MAX_TRACKERS);
+    tracker_events_pairing_invalidate(BIT(id));
+}
+static void tdma_recalculate(void) { assert(irq_depth==0); }
 static void checked_cleanup(void) {
     assert(irq_depth==0);
     tracker_events_pairing_cleanup();

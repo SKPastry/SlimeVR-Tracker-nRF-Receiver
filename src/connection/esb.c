@@ -38,6 +38,7 @@
 #include "connection/auto_channel.h"
 #include "tracker_events.h"
 #include "tracker_event_protocol.h"
+#include "connection/tracker_roster.h"
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
@@ -179,6 +180,7 @@ struct pairing_event {
 K_MSGQ_DEFINE(esb_pairing_msgq, sizeof(struct pairing_event), 8, 4);
 
 static K_MUTEX_DEFINE(tracker_store_lock);
+static bool tracker_store_ready;
 
 static uint8_t last_packet_sequence[MAX_TRACKERS];    // Track the last packet sequence for each tracker
 static uint8_t last_ping_counter[MAX_TRACKERS] = {0}; // Track the last PING counter for each tracker
@@ -186,6 +188,8 @@ static bool ping_counter_initialized[MAX_TRACKERS]
 	= {false};                                      // Flag indicating if a PING has been received from this tracker
 static uint64_t last_ping_time[MAX_TRACKERS] = {0}; // Track the last time a PING was received from each tracker
 static uint8_t last_pong_queued_counter[MAX_TRACKERS] = {0}; // Track the last PONG counter enqueued for each tracker
+static uint8_t pipe_mismatch_count[MAX_TRACKERS];
+static uint8_t crc_error_count[MAX_TRACKERS];
 static bool sequence_initialized[MAX_TRACKERS]; // Ordinary-data sequence anchor validity
 static uint16_t last_raw_seq[MAX_TRACKERS] = {0};
 static bool last_raw_valid[MAX_TRACKERS] = {false};
@@ -755,16 +759,6 @@ static volatile bool pairing_new_devices_blocked = false; // When true, only all
 // Cached receiver device address (set once at init, used by ISR for pairing responses)
 static uint8_t receiver_device_addr[6] = {0};
 
-// NVS async write infrastructure
-struct nvs_write_request {
-	uint16_t id;
-	uint8_t len;
-	uint8_t data[8]; // large enough for uint64_t
-};
-
-K_MSGQ_DEFINE(nvs_write_msgq, sizeof(struct nvs_write_request), 20, 4);
-
-static void nvs_writer_thread(void);
 
 // Packet statistics structure
 struct packet_stats {
@@ -1313,7 +1307,6 @@ K_THREAD_DEFINE(esb_stats_thread_id, 1024, esb_stats_thread, NULL, NULL, NULL, E
 
 static void esb_thread(void);
 K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, ESB_THREAD_PRIORITY, 0, 0);
-K_THREAD_DEFINE(nvs_writer_thread_id, 1024, nvs_writer_thread, NULL, NULL, NULL, NVS_WRITER_THREAD_PRIORITY, 0, 0);
 
 static bool esb_parse_pair(const uint8_t packet[8]);
 static void process_pairing_queue(void);
@@ -1337,15 +1330,6 @@ static inline int esb_find_tracker(uint64_t addr)
 	return -1;
 }
 
-// Queue an NVS write for async processing (thread-safe, non-blocking)
-static inline void nvs_write_async(uint16_t id, const void *data, size_t len)
-{
-	struct nvs_write_request req = {.id = id, .len = (uint8_t)MIN(len, sizeof(req.data))};
-	memcpy(req.data, data, req.len);
-	if (k_msgq_put(&nvs_write_msgq, &req, K_NO_WAIT) != 0) {
-		LOG_WRN("NVS write queue full, dropping write for id %u", id);
-	}
-}
 
 static int check_packet_sequence(uint8_t tracker_id, uint8_t received_seq)
 {
@@ -1582,10 +1566,12 @@ static void esb_stats_thread(void)
 			last_tps_print_time = now;
 
 			/* Recalculate dynamic TDMA config every TPS print cycle (~1s) */
+			k_mutex_lock(&tracker_store_lock, K_FOREVER);
 			tdma_shadow_update((uint32_t)now);
 			tdma_loss_controller_tick(now);
 			tdma_recalculate();
 			test_all_reconcile((int64_t)now);
+			k_mutex_unlock(&tracker_store_lock);
 		}
 
 		// Print detailed stats only when enabled
@@ -2308,7 +2294,6 @@ void event_handler(struct esb_evt const *event)
 					}
 
 					if (rx_payload.pipe != 1 + (tracker_id % 7)) {
-						static uint8_t pipe_mismatch_count[MAX_TRACKERS] = {0};
 						pipe_mismatch_count[tracker_id]++;
 						LOG_DBG(
 							"PING pipe mismatch (x%u): id=%u, expected "
@@ -2324,7 +2309,6 @@ void event_handler(struct esb_evt const *event)
 					uint8_t crc_calc = crc8_ccitt(0x07, rx_payload.data, ESB_PING_LEN - 1);
 					if (rx_payload.data[ESB_PING_LEN - 1] != crc_calc) {
 						// CRC error - only log warning if consecutive errors occur
-						static uint8_t crc_error_count[MAX_TRACKERS] = {0};
 						crc_error_count[tracker_id]++;
 
 						LOG_DBG(
@@ -3049,9 +3033,67 @@ void esb_set_addr_unified(void)
 	}
 }
 
+/* Caller holds tracker_store_lock and irq_lock. A slot is a new session. */
+static void tracker_slot_reset(uint8_t id)
+{
+	last_packet_sequence[id] = 0;
+	sequence_initialized[id] = false;
+	last_ping_counter[id] = 0;
+	ping_counter_initialized[id] = false;
+	last_ping_time[id] = 0;
+	last_pong_queued_counter[id] = 0;
+	pipe_mismatch_count[id] = 0;
+	crc_error_count[id] = 0;
+	last_raw_seq[id] = 0;
+	last_raw_valid[id] = false;
+	tracker_remote_command[id] = ESB_PONG_FLAG_NORMAL;
+	pending_cmd_arg[id] = 0;
+	tracker_test_on_tps[id] = 0;
+	for (unsigned int axis = 0; axis < 3; axis++) {
+		pending_sens_data[id][axis] = 0;
+	}
+	pending_sens_auto_axis[id] = 0;
+	pending_sens_auto_revolutions[id] = 0;
+	metadata_active_mask[id] = 0;
+	metadata_active_chunk[id] = 0;
+	metadata_active_token[id] = 0;
+	metadata_pending_mask[id] = 0;
+	metadata_pending_chunk[id] = 0;
+	metadata_pending_token[id] = 0;
+	atomic_and(&test_all_confirmed_mask, (atomic_val_t)~BIT(id));
+	atomic_set(&test_all_ready_after_ms[id], 0);
+	tdma_config_packed[id] = 0;
+	tdma_prev_recv[id] = 0;
+	tdma_prev_gaps[id] = 0;
+	tdma_prev_restarts[id] = 0;
+	memset(&tracker_stats[id], 0, sizeof(tracker_stats[id]));
+	decision_received[id] = 0;
+	decision_gaps[id] = 0;
+	memset(&g_tdma_stats[id], 0, sizeof(g_tdma_stats[id]));
+	g_last_ping_rx_time_diff_ticks[id] = 0;
+	g_last_ping_rx_time_diff_valid[id] = false;
+	g_ping_isr_rx_ticks[id] = 0;
+	g_ping_isr_rx_ticks_valid[id] = false;
+	g_last_isr_rx_ticks[id] = 0;
+	g_last_isr_rx_valid[id] = false;
+	g_bias_ppb_valid[id] = 0;
+	g_bias_ppb[id] = 0;
+	g_bias_ref_offset[id] = 0;
+	g_bias_ref_ticks[id] = 0;
+	g_last_ping_isr_rx_ticks_raw[id] = 0;
+	g_ping_dirty_streak[id] = 0;
+	g_ping_reject_count[id] = 0;
+	g_extrap_skip_count[id] = 0;
+	channel_target_mask &= ~BIT(id);
+	tdma_shadow_forget_tracker(id);
+	esb_auto_loss_invalidate();
+	hid_reset_rssi_smooth(id);
+	tracker_events_pairing_invalidate(BIT(id));
+}
+
 int esb_add_pair(uint64_t addr, bool checksum)
 {
-	if (addr == 0) {
+	if (!tracker_roster_address_valid(addr)) {
 		return -EINVAL;
 	}
 
@@ -3059,6 +3101,10 @@ int esb_add_pair(uint64_t addr, bool checksum)
 	int assigned_id = -1;
 
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	if (!tracker_store_ready) {
+		k_mutex_unlock(&tracker_store_lock);
+		return -EIO;
+	}
 	for (int i = 0; i < stored_trackers; i++) {
 		if (stored_tracker_addr[i] == addr) {
 			assigned_id = i;
@@ -3073,10 +3119,17 @@ int esb_add_pair(uint64_t addr, bool checksum)
 			return -ENOSPC;
 		}
 		assigned_id = stored_trackers;
+		uint64_t addresses[MAX_TRACKERS];
+		memcpy(addresses, stored_tracker_addr, sizeof(addresses));
+		addresses[assigned_id] = addr;
+		int err = tracker_roster_save(assigned_id + 1, addresses);
+		if (err) {
+			k_mutex_unlock(&tracker_store_lock);
+			LOG_ERR("Pairing not saved: %d", err);
+			return err;
+		}
 		unsigned int key = irq_lock();
-		tracker_events_pairing_invalidate(BIT(assigned_id));
-		// Write addr first, then barrier, then increment count
-		// This ensures ISR lockless reads see consistent data
+		tracker_slot_reset(assigned_id);
 		stored_tracker_addr[assigned_id] = addr;
 		__asm__ volatile("" ::: "memory"); // compiler barrier
 		stored_trackers = assigned_id + 1;
@@ -3089,10 +3142,6 @@ int esb_add_pair(uint64_t addr, bool checksum)
 
 	if (new_entry) {
 		LOG_INF("Added device on id %d with address %012llX", assigned_id, addr);
-		// Async NVS writes (non-blocking)
-		nvs_write_async(STORED_ADDR_0 + assigned_id, &stored_tracker_addr[assigned_id], sizeof(stored_tracker_addr[0]));
-		uint8_t count = stored_trackers;
-		nvs_write_async(STORED_TRACKERS, &count, sizeof(count));
 	} else {
 		LOG_INF("Device already stored with id %d", assigned_id);
 	}
@@ -3115,39 +3164,45 @@ int esb_add_pair(uint64_t addr, bool checksum)
 	return assigned_id;
 }
 
-void esb_pop_pair(void)
+int esb_pop_pair(void)
 {
-	uint64_t removed_addr = 0;
-	int removed_id = -1;
-
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
-	if (stored_trackers > 0) {
-		removed_id = stored_trackers - 1;
-		removed_addr = stored_tracker_addr[removed_id];
-		unsigned int key = irq_lock();
-		// Zero entry first, then barrier, then decrement count
-		// This ensures ISR lockless reads never match a removed entry
-		stored_tracker_addr[removed_id] = 0;
-		__asm__ volatile("" ::: "memory"); // compiler barrier
-		stored_trackers = (uint8_t)removed_id;
-		tracker_events_pairing_invalidate(BIT(removed_id));
-		irq_unlock(key);
-		tracker_events_pairing_cleanup();
+	if (!tracker_store_ready) {
+		k_mutex_unlock(&tracker_store_lock);
+		return -EIO;
 	}
+	if (stored_trackers == 0) {
+		k_mutex_unlock(&tracker_store_lock);
+		return 0;
+	}
+	uint8_t removed_id = stored_trackers - 1;
+	uint64_t removed_addr = stored_tracker_addr[removed_id];
+	uint64_t addresses[MAX_TRACKERS];
+	memcpy(addresses, stored_tracker_addr, sizeof(addresses));
+	addresses[removed_id] = 0;
+	int err = tracker_roster_save(removed_id, addresses);
+	if (err) {
+		k_mutex_unlock(&tracker_store_lock);
+		LOG_ERR("Pairing removal not saved: %d", err);
+		return err;
+	}
+	bool raw_target = data_collect_is_target(removed_id);
+	esb_ota_forget_tracker(removed_id);
+	data_collect_forget_tracker(removed_id);
+	unsigned int key = irq_lock();
+	if (raw_target) {
+		raw_arq_reset();
+	}
+	stored_trackers = removed_id;
+	stored_tracker_addr[removed_id] = 0;
+	tracker_slot_reset(removed_id);
+	irq_unlock(key);
+	tdma_last_reconfig_time = 0;
+	tdma_recalculate();
+	tracker_events_pairing_cleanup();
 	k_mutex_unlock(&tracker_store_lock);
-
-	if (removed_id >= 0) {
-		tdma_shadow_forget_tracker((uint8_t)removed_id);
-	}
-	if (removed_id >= 0) {
-		uint8_t count = stored_trackers;
-		nvs_write_async(STORED_TRACKERS, &count, sizeof(count));
-		uint64_t zero_addr = 0;
-		nvs_write_async(STORED_ADDR_0 + removed_id, &zero_addr, sizeof(zero_addr));
-		LOG_INF("Removed device on id %d with address %012llX", removed_id, removed_addr);
-	} else {
-		LOG_WRN("No devices to remove");
-	}
+	LOG_INF("Removed device on id %d with address %012llX", removed_id, removed_addr);
+	return 0;
 }
 
 static bool esb_parse_pair(const uint8_t packet[8])
@@ -3186,8 +3241,10 @@ static bool esb_parse_pair(const uint8_t packet[8])
 			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
 		} else if (assigned_id == -ENOSPC) {
 			LOG_WRN("Maximum tracker slots reached, cannot pair %012llX", found_addr);
+			return false;
 		} else {
 			LOG_ERR("Failed to store tracker address %012llX: %d", found_addr, assigned_id);
+			return false;
 		}
 	}
 
@@ -3261,73 +3318,45 @@ void esb_finish_pair(void)
 	LOG_INF("Pairing mode disabled");
 }
 
-void esb_clear(void)
+int esb_clear(void)
 {
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	uint64_t addresses[MAX_TRACKERS] = {0};
+	int err = tracker_roster_save(0, addresses);
+	if (err) {
+		k_mutex_unlock(&tracker_store_lock);
+		LOG_ERR("Pairings not cleared: %d", err);
+		return err;
+	}
 	esb_clearing = true;
-
-	// Disable pairing mode during clear
 	esb_pairing = false;
 	k_msgq_purge(&esb_pairing_msgq);
-
-	k_mutex_lock(&tracker_store_lock, K_FOREVER);
-	uint8_t previous_count = stored_trackers;
-	unsigned int key = irq_lock();
-	// Set count to 0 first — ISR immediately stops reading the array
-	stored_trackers = 0;
-	__asm__ volatile("" ::: "memory"); // compiler barrier
-	memset(stored_tracker_addr, 0, sizeof(stored_tracker_addr));
-	tracker_events_pairing_invalidate(BIT(MIN(previous_count, MAX_TRACKERS)) - 1U);
-	irq_unlock(key);
-	tracker_events_pairing_cleanup();
-	k_mutex_unlock(&tracker_store_lock);
-
-	// Async NVS writes
-	uint8_t zero_count = 0;
-	nvs_write_async(STORED_TRACKERS, &zero_count, sizeof(zero_count));
-	for (uint8_t i = 0; i < previous_count && i < MAX_TRACKERS; i++) {
-		uint64_t zero_addr = 0;
-		nvs_write_async(STORED_ADDR_0 + i, &zero_addr, sizeof(zero_addr));
-	}
-	LOG_INF("NVS Reset");
-
-	// Reset packet sequence state for all trackers
-	key = irq_lock();
-	esb_auto_loss_invalidate();
-	for (int i = 0; i < MAX_TRACKERS; i++) {
-		last_packet_sequence[i] = 0;
-		sequence_initialized[i] = false;
-		memset(&tracker_stats[i], 0, sizeof(struct packet_stats));
-	}
 	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
-		tdma_shadow_forget_tracker(i);
+		esb_ota_forget_tracker(i);
+		data_collect_forget_tracker(i);
+	}
+	unsigned int key = irq_lock();
+	atomic_inc(&test_all_generation);
+	test_all_invalidate();
+	atomic_set(&test_all_enabled, 0);
+	test_all_requested_tps = 0;
+	test_all_effective_tps = 0;
+	raw_arq_reset();
+	stored_trackers = 0;
+	memset(stored_tracker_addr, 0, sizeof(stored_tracker_addr));
+	for (uint8_t i = 0; i < MAX_TRACKERS; i++) {
+		tracker_slot_reset(i);
 	}
 	atomic_set(&tdma_shadow_desired_changed_at_ms, 0);
+	tracker_store_ready = true;
 	irq_unlock(key);
-	LOG_INF("Packet sequence state and statistics reset for all trackers");
-
-	hid_reset_all_rssi_smooth();
+	tdma_last_reconfig_time = 0;
+	tdma_recalculate();
+	tracker_events_pairing_cleanup();
 	esb_clearing = false;
-}
-
-// Reset packet sequence state for a specific tracker
-void esb_reset_tracker_sequence(uint8_t tracker_id)
-{
-	if (tracker_id < MAX_TRACKERS) {
-		unsigned int key = irq_lock();
-		esb_auto_loss_invalidate();
-		last_packet_sequence[tracker_id] = 0;
-		sequence_initialized[tracker_id] = false;
-		// Reset PING counter tracking
-		last_ping_counter[tracker_id] = 0;
-		ping_counter_initialized[tracker_id] = false;
-		last_pong_queued_counter[tracker_id] = 0;
-		// Reset statistics
-		memset(&tracker_stats[tracker_id], 0, sizeof(struct packet_stats));
-		irq_unlock(key);
-		// Reset RSSI smoothing state
-		hid_reset_rssi_smooth(tracker_id);
-		LOG_INF("Packet sequence state and statistics reset for tracker %d", tracker_id);
-	}
+	k_mutex_unlock(&tracker_store_lock);
+	LOG_INF("Pairings cleared and saved");
+	return 0;
 }
 
 void esb_send_remote_command_sens(uint8_t tracker_id, float x, float y, float z)
@@ -4248,27 +4277,35 @@ void esb_receive(void)
 	esb_set_addr_unified();
 }
 
-// NVS writer thread: processes async NVS write requests
-static void nvs_writer_thread(void)
+
+/* Thread context only; failed reads never replace the published roster. */
+static int tracker_store_restore(void)
 {
-	struct nvs_write_request req;
-	while (1) {
-		k_msgq_get(&nvs_write_msgq, &req, K_FOREVER);
-		sys_write(req.id, NULL, req.data, req.len);
+	uint64_t addresses[MAX_TRACKERS];
+	uint8_t count;
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	int err = tracker_store_ready ? 0 : tracker_roster_load(&count, addresses);
+	if (!err && !tracker_store_ready) {
+		unsigned int key = irq_lock();
+		memcpy(stored_tracker_addr, addresses, sizeof(stored_tracker_addr));
+		stored_trackers = count;
+		tracker_store_ready = true;
+		irq_unlock(key);
 	}
+	k_mutex_unlock(&tracker_store_lock);
+	if (err) {
+		LOG_ERR("Tracker roster unavailable (%d); storage preserved", err);
+	}
+	return err;
 }
 
 static void esb_thread(void)
 {
 	clocks_start();
 
-	sys_read(STORED_TRACKERS, &stored_trackers, sizeof(stored_trackers));
-	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	int roster_err = tracker_store_restore();
+	uint32_t roster_retry_at = k_uptime_get_32() + 1000;
 	uint8_t tracker_count = stored_trackers;
-	for (uint8_t i = 0; i < tracker_count && i < MAX_TRACKERS; i++) {
-		sys_read(STORED_ADDR_0 + i, &stored_tracker_addr[i], sizeof(stored_tracker_addr[0]));
-	}
-	k_mutex_unlock(&tracker_store_lock);
 
 	// Load saved RF channel from NVS if exists (stored value is encoded).
 	uint8_t saved_channel = 0xFF;
@@ -4309,7 +4346,7 @@ static void esb_thread(void)
 	esb_start_rx();
 
 	// Auto-enable pairing mode if no stored trackers
-	if (tracker_count == 0) {
+	if (tracker_store_ready && tracker_count == 0) {
 		esb_pairing = true;
 		esb_auto_loss_invalidate();
 		pairing_start_time = k_uptime_get();
@@ -4321,6 +4358,17 @@ static void esb_thread(void)
 	auto_channel_init(receiver_device_addr);
 
 	while (1) {
+		/* Retry transient storage failures on the existing maintenance loop,
+		 * without delaying radio/USB initialization or adding a worker. */
+		uint32_t now_ms = k_uptime_get_32();
+		if (roster_err && roster_err != -EINVAL &&
+		    (int32_t)(now_ms - roster_retry_at) >= 0) {
+			roster_err = tracker_store_restore();
+			roster_retry_at = k_uptime_get_32() + 1000;
+			if (!roster_err && stored_trackers == 0) {
+				esb_start_pairing();
+			}
+		}
 		tracker_events_process(k_uptime_get_32());
 		// Process new device pairing requests (non-blocking)
 		if (esb_pairing) {

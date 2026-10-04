@@ -13,11 +13,19 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
 import tempfile
 import types
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness'))
+from c_extract import extract_block
+
+def function(text, name):
+    return extract_block(text, r'^[\w \t*]+\b' + re.escape(name) +
+                         r'\s*\([^;{}]*\)\s*\{') + '\n'
 
 CASES = ('golden', 'decoder', 'timeout', 'storage', 'nonce', 'sequence',
          'long-heartbeat', 'subscriptions', 'rest', 'independent', 'pairing',
@@ -149,11 +157,11 @@ def main():
         esb = (root/'src/connection/esb.c').read_text()
         lengths = esb[esb.index('static int composite_body_length('):esb.index('void event_handler(')]
         composite = esb[esb.index('handle_composite_packet:'):esb.index('\n\t\t\t} break;', esb.index('handle_composite_packet:'))]
-        clear = esb[esb.index('void esb_clear(void)'):esb.index('\n\t// Async NVS writes', esb.index('void esb_clear(void)'))]
+        clear = function(esb, 'esb_clear')
         (path/'esb_event_paths.inc').write_text(
             lengths + '\nstatic void composite_receive(void) { do { switch (0) { case 0: {\n'
             + composite.replace('handle_composite_packet:', '')
-            + '\n} break; } } while (0); }\n' + clear + '\n}\n')
+            + '\n} break; } } while (0); }\n' + clear)
         binary = path/'test'
         command = shlex.split(os.environ.get('CC','cc')) + [
             '-std=c11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',

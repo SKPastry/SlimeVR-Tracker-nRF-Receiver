@@ -297,7 +297,7 @@ static void auto_snapshot(void)
 	esb_get_auto_loss_snapshot(&after);
 	assert(after.tracker[3].received == 2 && after.tracker[3].restarts == 2);
 	before = after;
-	esb_reset_tracker_sequence(3);
+	esb_rx_discontinuity();
 	for (unsigned i = 0; i < 20; ++i) check_packet_sequence(3, i);
 	esb_get_auto_loss_snapshot(&after);
 	assert(after.tracker[3].received > before.tracker[3].received);

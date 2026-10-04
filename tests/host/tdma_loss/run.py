@@ -107,7 +107,6 @@ def production_bodies(source, header=''):
         snapshot += function(source, 'esb_get_auto_loss_snapshot')
         snapshot += function(source, 'esb_rx_discontinuity')
         snapshot += function(source, 'esb_auto_loss_rebase', optional=True)
-        snapshot += function(source, 'esb_reset_tracker_sequence')
         snapshot += function(source, 'esb_reset_all_stats')
 
     admission = ''

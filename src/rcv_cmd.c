@@ -119,8 +119,7 @@ uint8_t rcv_cmd_exit_pair(void)
 
 uint8_t rcv_cmd_clear(void)
 {
-	esb_clear();
-	return RCV_HID_ST_OK;
+	return esb_clear() == 0 ? RCV_HID_ST_OK : RCV_HID_ST_EBUSY;
 }
 
 uint8_t rcv_cmd_add(uint64_t addr, int8_t *slot_out)
@@ -138,13 +137,12 @@ uint8_t rcv_cmd_add(uint64_t addr, int8_t *slot_out)
 	if (slot == -ENOSPC) {
 		return RCV_HID_ST_ENOSPC;
 	}
-	return RCV_HID_ST_EINVAL;
+	return slot == -EINVAL ? RCV_HID_ST_EINVAL : RCV_HID_ST_EBUSY;
 }
 
 uint8_t rcv_cmd_remove(void)
 {
-	esb_pop_pair();
-	return RCV_HID_ST_OK;
+	return esb_pop_pair() == 0 ? RCV_HID_ST_OK : RCV_HID_ST_EBUSY;
 }
 
 uint8_t rcv_cmd_list(void)

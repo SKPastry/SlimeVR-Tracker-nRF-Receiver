@@ -146,14 +146,13 @@ void esb_set_addr_paired(void);
 void esb_set_addr_unified(void);
 
 int esb_add_pair(uint64_t addr, bool checksum);
-void esb_pop_pair(void);
+int esb_pop_pair(void);
 
 void esb_start_pairing(void);
 void esb_start_pairing_with_count(uint8_t target_count);
 void esb_reset_pair(void);
 void esb_finish_pair(void);
-void esb_clear(void);
-void esb_reset_tracker_sequence(uint8_t tracker_id);
+int esb_clear(void);
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 void esb_print_health_snapshot(void);
 #endif

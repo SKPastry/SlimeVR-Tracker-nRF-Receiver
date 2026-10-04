@@ -68,6 +68,7 @@ int main(void)
 	{
 		LOG_INF("Button detected during boot");
 		int64_t boot_start = k_uptime_get();
+		bool pairing_reset_saved = false;
 
 		while (button_read())
 		{
@@ -76,13 +77,13 @@ int main(void)
 			if (k_uptime_get() - boot_start > 5000)
 			{
 				LOG_INF("Boot-time pairing reset requested");
-				esb_clear();
+				pairing_reset_saved = esb_clear() == 0;
 				break;
 			}
 			k_msleep(10);
 		}
 
-		if (k_uptime_get() - boot_start > 5000)
+		if (pairing_reset_saved)
 			set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_HIGHEST);
 		else if (k_uptime_get() - boot_start > 50) // Short press during boot
 			set_led(SYS_LED_PATTERN_ONESHOT_POWERON, SYS_LED_PRIORITY_HIGHEST);

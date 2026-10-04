@@ -274,8 +274,11 @@ static void button_thread(void)
 			if (press_duration >= 5000 && press_duration < 10000 && !long_press_5s_triggered)
 			{
 				LOG_INF("Clear all pairings requested (5s) - triggered on release");
-				esb_clear();
-				set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_HIGHEST);
+				if (esb_clear() == 0) {
+					set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_HIGHEST);
+				} else {
+					LOG_ERR("Pairings were not cleared");
+				}
 				long_press_5s_triggered = true;
 				// Reset counters
 				num_presses = 0;
