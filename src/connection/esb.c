@@ -189,8 +189,8 @@ static uint8_t last_pong_queued_counter[MAX_TRACKERS] = {0}; // Track the last P
 static bool sequence_initialized[MAX_TRACKERS]; // Ordinary-data sequence anchor validity
 static uint16_t last_raw_seq[MAX_TRACKERS] = {0};
 static bool last_raw_valid[MAX_TRACKERS] = {false};
-// Shared ACK state: written by threads/event_handler, read by ack_handler (radio ISR).
-// On single-core Cortex-M, volatile ensures visibility between ISR priorities.
+// Shared ACK tuples are published under irq_lock, including their command flag.
+// Volatile alone does not make a multi-field command atomic.
 static volatile uint8_t tracker_remote_command[MAX_TRACKERS]; // Command flag for next PONG
 static volatile uint8_t pending_cmd_arg[MAX_TRACKERS];       // Optional byte carried in PONG data[8]
 static volatile uint16_t tracker_test_on_tps[MAX_TRACKERS];   // Optional TPS carried by TEST_MODE_ON
@@ -3339,10 +3339,14 @@ void esb_send_remote_command_sens(uint8_t tracker_id, float x, float y, float z)
 	if (tracker_id >= MAX_TRACKERS) {
 		return;
 	}
-	pending_sens_data[tracker_id][0] = (int16_t)(x * 100.0f);
-	pending_sens_data[tracker_id][1] = (int16_t)(y * 100.0f);
-	pending_sens_data[tracker_id][2] = (int16_t)(z * 100.0f);
+	int16_t sensitivity[3] = {(int16_t)(x * 100.0f), (int16_t)(y * 100.0f),
+				 (int16_t)(z * 100.0f)};
+	unsigned int key = irq_lock();
+	pending_sens_data[tracker_id][0] = sensitivity[0];
+	pending_sens_data[tracker_id][1] = sensitivity[1];
+	pending_sens_data[tracker_id][2] = sensitivity[2];
 	tracker_remote_command[tracker_id] = ESB_PONG_FLAG_SENS_SET;
+	irq_unlock(key);
 	LOG_INF("Queued SENS_SET for tracker %u: %.2f, %.2f, %.2f", tracker_id, (double)x, (double)y, (double)z);
 }
 
@@ -3354,10 +3358,12 @@ bool esb_send_remote_command_sens_auto(uint8_t tracker_id, uint8_t axis, uint16_
 
 	int64_t now = k_uptime_get();
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	unsigned int key = irq_lock();
 	bool active = tracker_id < stored_trackers && stored_tracker_addr[tracker_id] != 0
 			   && tracker_stats[tracker_id].last_packet_time > 0
 			   && now - tracker_stats[tracker_id].last_packet_time <= PING_TIMEOUT_MS;
 	if (!active) {
+		irq_unlock(key);
 		k_mutex_unlock(&tracker_store_lock);
 		LOG_WRN("SENS_AUTO not queued for inactive tracker %u", tracker_id);
 		return false;
@@ -3365,6 +3371,7 @@ bool esb_send_remote_command_sens_auto(uint8_t tracker_id, uint8_t axis, uint16_
 	pending_sens_auto_axis[tracker_id] = axis;
 	pending_sens_auto_revolutions[tracker_id] = revolutions;
 	tracker_remote_command[tracker_id] = ESB_PONG_FLAG_SENS_AUTO;
+	irq_unlock(key);
 	k_mutex_unlock(&tracker_store_lock);
 
 	if (revolutions == 0) {
@@ -3384,6 +3391,7 @@ uint32_t esb_send_remote_command_sens_auto_all(uint8_t axis, uint16_t revolution
 	k_msleep(REMOTE_COMMAND_ACTIVE_SCAN_MS);
 
 	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	unsigned int key = irq_lock();
 	for (uint8_t i = 0; i < stored_trackers && i < MAX_TRACKERS; i++) {
 		if (stored_tracker_addr[i] != 0 && tracker_stats[i].last_packet_time >= scan_start_time) {
 			pending_sens_auto_axis[i] = axis;
@@ -3393,6 +3401,7 @@ uint32_t esb_send_remote_command_sens_auto_all(uint8_t axis, uint16_t revolution
 			count++;
 		}
 	}
+	irq_unlock(key);
 	k_mutex_unlock(&tracker_store_lock);
 
 	if (revolutions == 0) {
@@ -3729,6 +3738,7 @@ void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8
 		return;
 	}
 	if (tracker_id < MAX_TRACKERS) {
+		unsigned int key = irq_lock();
 		if (command_flag == ESB_PONG_FLAG_DATA_COLLECT_ON ||
 		    command_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
 			last_raw_valid[tracker_id] = false;
@@ -3738,6 +3748,7 @@ void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8
 		}
 		pending_cmd_arg[tracker_id] = arg;
 		tracker_remote_command[tracker_id] = command_flag;
+		irq_unlock(key);
 		LOG_INF("Remote command %s (0x%02X) queued for tracker %d", esb_pong_flag_name(command_flag),
 			command_flag, tracker_id);
 	} else {
