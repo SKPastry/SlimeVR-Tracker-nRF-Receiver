@@ -1829,46 +1829,46 @@ static void esb_ack_handler_cb(
 			return;
 		}
 		uint8_t counter = pdu_data[2];
+		bool channel_confirm = (pdu_data[7] & ESB_PING_FLAG_CHANNEL_CONFIRM) != 0;
 		uint32_t rx_ticks = k_uptime_ticks();
-		uint8_t cmd = tracker_remote_command[tracker_id];
-		/* Keep an active metadata request on duplicate PINGs until its echo
-		 * arrives; publish pending tuple atomically against the radio ISR. */
-		unsigned int metadata_key = irq_lock();
-		if (cmd == ESB_PONG_FLAG_NORMAL && metadata_active_mask[tracker_id] != 0) {
-			cmd = ESB_PONG_FLAG_METADATA_REQUEST;
-		} else if (cmd == ESB_PONG_FLAG_NORMAL && metadata_pending_mask[tracker_id] != 0) {
-			metadata_active_mask[tracker_id] = metadata_pending_mask[tracker_id];
-			metadata_active_chunk[tracker_id] = metadata_pending_chunk[tracker_id];
-			metadata_active_token[tracker_id] = metadata_pending_token[tracker_id];
-			metadata_pending_mask[tracker_id] = 0;
-			cmd = ESB_PONG_FLAG_METADATA_REQUEST;
+		uint8_t cmd = ESB_PONG_FLAG_CHANNEL_CONFIRM;
+		bool ota_aborting = false;
+		if (!channel_confirm) {
+			cmd = tracker_remote_command[tracker_id];
+			/* Keep an active metadata request on duplicate PINGs until its echo
+			 * arrives; channel probes must leave both pending and active tuples alone. */
+			unsigned int metadata_key = irq_lock();
+			if (cmd == ESB_PONG_FLAG_NORMAL && metadata_active_mask[tracker_id] != 0) {
+				cmd = ESB_PONG_FLAG_METADATA_REQUEST;
+			} else if (cmd == ESB_PONG_FLAG_NORMAL && metadata_pending_mask[tracker_id] != 0) {
+				metadata_active_mask[tracker_id] = metadata_pending_mask[tracker_id];
+				metadata_active_chunk[tracker_id] = metadata_pending_chunk[tracker_id];
+				metadata_active_token[tracker_id] = metadata_pending_token[tracker_id];
+				metadata_pending_mask[tracker_id] = 0;
+				cmd = ESB_PONG_FLAG_METADATA_REQUEST;
+			}
+			irq_unlock(metadata_key);
+			uint8_t migration_cmd = channel_command_for_tracker(tracker_id);
+			if (migration_cmd != ESB_PONG_FLAG_NORMAL) {
+				cmd = migration_cmd;
+			}
+			/* In single-target collection, shut down non-target trackers. */
+			if (data_collect_is_active() && !data_collect_is_target(tracker_id)
+				&& !data_collect_batch_is_active()) {
+				cmd = ESB_PONG_FLAG_SHUTDOWN;
+			}
+			/* Keep rebooted non-participating trackers suppressed during OTA. */
+			if (cmd == ESB_PONG_FLAG_NORMAL && esb_ota_relay_is_active() && !esb_ota_relay_is_target(tracker_id)) {
+				cmd = ESB_PONG_FLAG_OTA_SUPPRESS;
+			}
+			ota_aborting = esb_ota_relay_abort_pending(tracker_id);
+			if (ota_aborting) {
+				cmd = ESB_PONG_FLAG_OTA_ABORT;
+			}
 		}
-		irq_unlock(metadata_key);
-		uint8_t migration_cmd = channel_command_for_tracker(tracker_id);
-		if (migration_cmd != ESB_PONG_FLAG_NORMAL) {
-			cmd = migration_cmd;
-		}
-		/* Save accurate RADIO ISR timestamp for clock_bias computation in event_handler */
+		/* Save accurate RADIO ISR timestamp for clock_bias computation in event_handler. */
 		g_ping_isr_rx_ticks[tracker_id] = rx_ticks;
 		g_ping_isr_rx_ticks_valid[tracker_id] = true;
-
-		/* In single-target data collection mode, force SHUTDOWN for non-target trackers. */
-		if (data_collect_is_active() && !data_collect_is_target(tracker_id)
-			&& !data_collect_batch_is_active()) {
-			cmd = ESB_PONG_FLAG_SHUTDOWN;
-		}
-
-		/* During active OTA, keep non-participating trackers suppressed.
-		 * This handles trackers that reboot mid-session (e.g. after a
-		 * previous batch completes) and reconnect without suppress. */
-		if (cmd == ESB_PONG_FLAG_NORMAL && esb_ota_relay_is_active() && !esb_ota_relay_is_target(tracker_id)) {
-			cmd = ESB_PONG_FLAG_OTA_SUPPRESS;
-		}
-
-		bool ota_aborting = esb_ota_relay_abort_pending(tracker_id);
-		if (ota_aborting) {
-			cmd = ESB_PONG_FLAG_OTA_ABORT;
-		}
 
 		ack_payload->pipe = 1 + (tracker_id % 7);
 		ack_payload->length = ESB_PONG_LEN;
@@ -1930,8 +1930,17 @@ static void esb_ack_handler_cb(
 				ack_payload->data[9] = 0;
 				ack_payload->data[10] = 0;
 				ack_payload->data[11] = 0;
+			} else if (cmd == ESB_PONG_FLAG_CHANNEL_CONFIRM) {
+				uint32_t channel = UINT32_MAX;
+				if (esb_get_rf_channel(&channel) || channel > 100) {
+					return;
+				}
+				ack_payload->data[8] = (uint8_t)channel;
+				ack_payload->data[9] = ESB_CHANNEL_CONFIRM_VERSION;
+				ack_payload->data[10] = 0;
+				ack_payload->data[11] = 0;
 			} else if (cmd == ESB_PONG_FLAG_NORMAL) {
-				/* Piggyback dynamic TDMA config in bytes 8-11. */
+				/* Preserve the legacy TDMA tuple byte for byte. */
 				uint32_t cfg = tdma_config_packed[tracker_id];
 				ack_payload->data[8] = (cfg >> 24) & 0xFF;
 				ack_payload->data[9] = (cfg >> 16) & 0xFF;
@@ -1953,7 +1962,7 @@ static void esb_ack_handler_cb(
 		/* If OTA session has a pending command for this tracker
 		 * (e.g., BEGIN before tracker enters OTA mode), override the
 		 * standard PONG with the OTA payload. */
-		if (esb_ota_relay_is_active() && esb_ota_relay_is_target(tracker_id)) {
+		if (!channel_confirm && esb_ota_relay_is_active() && esb_ota_relay_is_target(tracker_id)) {
 			bool ota_has_ack = false;
 			esb_ota_relay_fill_ack(tracker_id, pipe_id, ack_payload, &ota_has_ack, NULL, 0);
 			if (ota_has_ack) {
@@ -2288,7 +2297,7 @@ void event_handler(struct esb_evt const *event)
 					uint8_t tracker_id = rx_payload.data[1];
 					uint8_t counter = rx_payload.data[2];
 
-					uint8_t ping_ack_flag = rx_payload.data[7];
+					uint8_t ping_ack_flag = rx_payload.data[7] & ESB_PING_COMMAND_MASK;
 
 					/* ack_handler clamps; this path must too before any [MAX_TRACKERS] index. */
 					if (tracker_id >= MAX_TRACKERS) {

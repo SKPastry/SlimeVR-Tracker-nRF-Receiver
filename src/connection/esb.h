@@ -31,6 +31,13 @@
 #define ESB_PONG_TYPE 0xF1
 #define ESB_PING_LEN 13
 #define ESB_PONG_LEN 13
+/* PING data[7]: low seven bits acknowledge a command; bit 7 requests a
+ * dedicated physical-channel response, without changing legacy NORMAL. */
+#define ESB_PING_FLAG_CHANNEL_CONFIRM 0x80
+#define ESB_PING_COMMAND_MASK 0x7F
+/* Response only: byte 8 is physical channel, byte 9 version, bytes 10-11 zero. */
+#define ESB_PONG_FLAG_CHANNEL_CONFIRM 0x37
+#define ESB_CHANNEL_CONFIRM_VERSION 1
 #define ESB_MAX_PAYLOAD_LEN CONFIG_ESB_MAX_PAYLOAD_LENGTH
 #define ESB_COMPOSITE_TYPE 0xFE // Composite packet containing multiple sub-packets
 

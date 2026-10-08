@@ -38,7 +38,8 @@ production += "\n".join(extract.function(source, name) for name in functions)
 # Execute exactly the production migration selection and channel wire encoding,
 # with only the unrelated TDMA/metadata ACK fields omitted.
 start = source.index("uint8_t migration_cmd = channel_command_for_tracker")
-overlay = source[start:source.index("/* Save accurate RADIO ISR", start)]
+overlay = source[start:source.index(";", start) + 1] + "\n"
+overlay += extract.block(source, source.index("if (migration_cmd != ESB_PONG_FLAG_NORMAL)", start))
 start = source.index("if (cmd == ESB_PONG_FLAG_SET_CHANNEL)")
 encoding = extract.block(source, start)
 production += "\nstatic uint8_t pong(uint8_t tracker_id, struct payload *ack_payload) {\n"
@@ -46,9 +47,23 @@ production += "uint8_t cmd = tracker_remote_command[tracker_id];\n" + overlay + 
 production += "return cmd;\n}\n"
 fixture = (HERE / "test_channel_migration.c").read_text()
 prelude, cases = fixture.split("/* PRODUCTION BODIES */")
+# Exercise the complete production ACK callback, including pairing, channel
+# confirmation priority, command formats, OTA override and CRC generation.
+defines = []
+for line in header.splitlines():
+    match = re.match(r"#define (ESB_(?:PING|PONG|RAW|OTA|CHANNEL_CONFIRM)_\w+)\s+", line)
+    if match and not re.search(r"#define\s+" + match[1] + r"\b", prelude):
+        defines.append(line)
+prelude = "\n".join(defines) + "\n" + prelude
+production += "\n" + extract.function(source, "esb_ack_handler_cb")
 start = source.index("if (ping_ack_flag != ESB_PONG_FLAG_NORMAL)")
 production += "\nstatic void echo(uint8_t tracker_id, uint8_t ping_ack_flag) {\n"
-production += "struct payload rx_payload = {0};\n" + extract.block(source, start) + "\n}\n"
+production += "struct payload rx_payload = {0};\n"
+production += "rx_payload.data[7] = ping_ack_flag;\n"
+start_mask = source.index("uint8_t ping_ack_flag = rx_payload.data[7]")
+production += source[start_mask:source.index(";", start_mask) + 1].replace(
+    "uint8_t ping_ack_flag =", "ping_ack_flag =") + "\n"
+production += extract.block(source, start) + "\n}\n"
 control = (ROOT / "src/rcv_cmd.c").read_text()
 production += "\nuint8_t rcv_cmd_collect_stop(void);\nuint8_t rcv_cmd_collect_batch_stop(void);\n"
 production += "\n".join(extract.function(control, name) for name in (

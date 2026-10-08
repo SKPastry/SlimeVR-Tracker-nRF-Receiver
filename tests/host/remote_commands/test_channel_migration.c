@@ -121,6 +121,47 @@ static void auto_channel_migration_complete(uint32_t generation, uint8_t old_hom
                         (durable_channel == 128 ? 0 : durable_channel) == new_home);
 }
 struct payload { uint8_t data[13]; };
+struct esb_payload { uint8_t data[64]; uint8_t length, pipe; bool noack; };
+static uint32_t tdma_config_packed[MAX_TRACKERS];
+static uint8_t metadata_active_mask[MAX_TRACKERS], metadata_pending_mask[MAX_TRACKERS];
+static uint8_t metadata_active_chunk[MAX_TRACKERS], metadata_pending_chunk[MAX_TRACKERS];
+static uint16_t metadata_active_token[MAX_TRACKERS], metadata_pending_token[MAX_TRACKERS];
+static int16_t pending_sens_data[MAX_TRACKERS][3];
+static uint8_t pending_sens_auto_axis[MAX_TRACKERS];
+static uint16_t pending_sens_auto_revolutions[MAX_TRACKERS];
+static uint32_t g_last_isr_rx_ticks[MAX_TRACKERS], g_ping_isr_rx_ticks[MAX_TRACKERS];
+static bool g_last_isr_rx_valid[MAX_TRACKERS], g_ping_isr_rx_ticks_valid[MAX_TRACKERS];
+static bool pairing_new_devices_blocked, ota_target, ota_payload;
+static uint8_t receiver_device_addr[6] = {1, 2, 3, 4, 5, 6};
+static int channel_get_error;
+static uint32_t k_uptime_ticks(void) { return 0x12345678; }
+static int esb_get_rf_channel(uint32_t *channel) {
+    *channel = physical_channel;
+    return channel_get_error;
+}
+static bool auto_channel_is_beacon(const uint8_t *p, uint8_t len) { return false; }
+static bool data_collect_is_target(uint8_t id) { return id == collecting_id; }
+static bool esb_ota_relay_is_target(uint8_t id) { return ota_target; }
+static int esb_find_tracker(uint64_t addr) {
+    for (unsigned i = 0; i < stored_trackers; ++i)
+        if (stored_tracker_addr[i] == addr) return i;
+    return -1;
+}
+static uint8_t crc8_ccitt(uint8_t crc, const uint8_t *data, size_t len) {
+    while (len--) {
+        crc ^= *data++;
+        for (unsigned bit = 0; bit < 8; ++bit)
+            crc = (uint8_t)((crc << 1) ^ ((crc & 0x80) ? 0x07 : 0));
+    }
+    return crc;
+}
+static uint16_t sys_get_be16(const uint8_t *p) { return (p[0] << 8) | p[1]; }
+static void raw_arq_process_isr(uint16_t seq, struct esb_payload *p, bool *has) {}
+static void esb_ota_relay_fill_ack(uint8_t id, uint32_t pipe, struct esb_payload *p,
+                                 bool *has, const uint8_t *data, uint8_t len) {
+    *has = ota_payload;
+    if (*has) { p->length = 17; p->data[0] = 0xAB; }
+}
 /* PRODUCTION BODIES */
 static unsigned completed;
 static bool succeeded;
@@ -137,6 +178,11 @@ static void reset(unsigned count) {
     memset(stored_tracker_addr, 0, sizeof(stored_tracker_addr));
     memset(tracker_remote_command, 0, sizeof(tracker_remote_command));
     memset(abort_pending, 0, sizeof(abort_pending));
+    memset(metadata_active_mask, 0, sizeof(metadata_active_mask));
+    memset(metadata_pending_mask, 0, sizeof(metadata_pending_mask));
+    memset(tdma_config_packed, 0, sizeof(tdma_config_packed));
+    ota_target = ota_payload = pairing_new_devices_blocked = false;
+    channel_get_error = 0;
     for (unsigned i = 0; i < count; i++) stored_tracker_addr[i] = 100 + i;
     receiver_rf_channel = physical_channel = durable_channel = 22;
     rx_running = auto_enabled = true;
@@ -157,7 +203,136 @@ static void assert_wire(uint8_t id, uint8_t flag, uint8_t channel) {
         assert(p.data[8] == 0 && p.data[9] == 0 && p.data[10] == 0 && p.data[11] == channel);
     }
 }
+static struct esb_payload test_pong(uint8_t flags) {
+    uint8_t ping[ESB_PING_LEN] = {ESB_PING_TYPE, 0, 7};
+    ping[7] = flags;
+    ping[12] = crc8_ccitt(0x07, ping, 12);
+    struct esb_payload ack = {0};
+    bool has = false, suppress = false;
+    esb_ack_handler_cb(ping, sizeof(ping), 1, &ack, &has, &suppress);
+    assert(has && !suppress);
+    assert(ack.length == 13 && ack.data[0] == ESB_PONG_TYPE);
+    assert(ack.data[1] == 0 && ack.data[2] == 7);
+    assert(ack.data[12] == crc8_ccitt(0x07, ack.data, 12));
+    return ack;
+}
+static void assert_channel_confirm(struct esb_payload p, uint8_t channel) {
+    assert(p.data[7] == ESB_PONG_FLAG_CHANNEL_CONFIRM);
+    assert(p.data[8] == channel && p.data[9] == ESB_CHANNEL_CONFIRM_VERSION);
+    assert(p.data[10] == 0 && p.data[11] == 0);
+    assert(p.data[3] == 0x12 && p.data[4] == 0x34 &&
+           p.data[5] == 0x56 && p.data[6] == 0x78);
+}
+static void test_channel_pongs(void) {
+    reset(2);
+    /* Released trackers see the exact legacy tuple at every physical channel. */
+    for (unsigned channel = 0; channel <= 100; ++channel) {
+        physical_channel = channel;
+        for (unsigned total = 1; total <= 16; ++total) {
+            for (unsigned slot = 0; slot < total; ++slot) {
+                tdma_config_packed[0] = slot << 24 | total << 16 | 32 << 8 | 0xFE;
+                struct esb_payload p = test_pong(0);
+                uint8_t legacy[13] = {
+                    ESB_PONG_TYPE, 0, 7, 0x12, 0x34, 0x56, 0x78,
+                    ESB_PONG_FLAG_NORMAL, slot, total, 32, 0xFE, 0,
+                };
+                legacy[12] = crc8_ccitt(0x07, legacy, 12);
+                assert(!memcmp(p.data, legacy, sizeof(legacy)));
+            }
+        }
+        assert_channel_confirm(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM), channel);
+    }
+    uint32_t inactive[] = {0, 0xFF000007, 0xFF102007};
+    for (unsigned i = 0; i < sizeof(inactive) / sizeof(inactive[0]); ++i) {
+        tdma_config_packed[0] = inactive[i];
+        struct esb_payload p = test_pong(0);
+        assert(p.data[8] == (uint8_t)(inactive[i] >> 24));
+        assert(p.data[9] == (uint8_t)(inactive[i] >> 16));
+        assert(p.data[10] == (uint8_t)(inactive[i] >> 8));
+        assert(p.data[11] == (uint8_t)inactive[i]);
+    }
+    /* Actual84, not stored default255 or migration destination85. */
+    physical_channel = 84;
+    receiver_rf_channel = ESB_RF_CHANNEL_DEFAULT;
+    assert(esb_set_all_trackers_channel(85) == 0);
+    tracker_remote_command[0] = ESB_PONG_FLAG_MEOW;
+    metadata_pending_mask[0] = 1;
+    assert_channel_confirm(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM), 84);
+    assert(tracker_remote_command[0] == ESB_PONG_FLAG_MEOW);
+    assert(metadata_pending_mask[0] == 1 && metadata_active_mask[0] == 0);
+    struct esb_payload p = test_pong(0);
+    assert(p.data[7] == ESB_PONG_FLAG_SET_CHANNEL);
+    assert(p.data[8] == 0 && p.data[9] == 0 && p.data[10] == 0 && p.data[11] == 85);
+    /* Flagged echoes retain real low-seven-bit acknowledgements only. */
+    echo(0, ESB_PING_FLAG_CHANNEL_CONFIRM);
+    assert(tracker_remote_command[0] == ESB_PONG_FLAG_MEOW);
+    echo(0, ESB_PING_FLAG_CHANNEL_CONFIRM | ESB_PONG_FLAG_MEOW);
+    assert(tracker_remote_command[0] == ESB_PONG_FLAG_NORMAL);
+    reset(1);
+    physical_channel = 84;
+    abort_pending[0] = true;
+    ota = ota_target = ota_payload = true;
+    p = test_pong(0);
+    assert(p.data[7] == ESB_PONG_FLAG_OTA_ABORT);
+    assert(p.data[8] == 0 && p.data[9] == 0 && p.data[10] == 0 && p.data[11] == 0);
+    assert_channel_confirm(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM), 84);
+    assert(abort_pending[0]); /* Not consumed by a channel probe. */
+    abort_pending[0] = false;
+    assert_channel_confirm(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM), 84);
+    /* The next unflagged PING still reaches the existing OTA BEGIN overlay. */
+    uint8_t ping[13] = {ESB_PING_TYPE, 0, 7};
+    ping[12] = crc8_ccitt(0x07, ping, 12);
+    struct esb_payload begin = {0};
+    bool has_begin = false, suppress_begin = false;
+    esb_ack_handler_cb(ping, sizeof(ping), 1, &begin, &has_begin, &suppress_begin);
+    assert(has_begin && !suppress_begin && begin.length == 17 && begin.data[0] == 0xAB);
+    /* Controls keep their established argument layouts and queue state. */
+    reset(1);
+    physical_channel = 84;
+    tracker_remote_command[0] = ESB_PONG_FLAG_OTA_QUERY_INFO;
+    assert_channel_confirm(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM), 84);
+    assert(tracker_remote_command[0] == ESB_PONG_FLAG_OTA_QUERY_INFO);
+    assert(test_pong(0).data[7] == ESB_PONG_FLAG_OTA_QUERY_INFO);
+    tracker_remote_command[0] = ESB_PONG_FLAG_SENS_SET;
+    pending_sens_data[0][0] = 0x1234;
+    pending_sens_data[0][1] = 0x5678;
+    pending_sens_data[0][2] = 0x2345;
+    p = test_pong(0);
+    assert(p.data[7] == ESB_PONG_FLAG_SENS_SET);
+    assert(p.data[3] == 0x12 && p.data[4] == 0x34);
+    assert(p.data[5] == 0x56 && p.data[6] == 0x78);
+    assert(p.data[8] == 0x23 && p.data[9] == 0x45);
+    assert_channel_confirm(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM), 84);
+    assert(tracker_remote_command[0] == ESB_PONG_FLAG_SENS_SET);
+    tracker_remote_command[0] = ESB_PONG_FLAG_NORMAL;
+    metadata_pending_mask[0] = 3;
+    metadata_pending_chunk[0] = 4;
+    metadata_pending_token[0] = 0x5678;
+    assert_channel_confirm(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM), 84);
+    assert(metadata_pending_mask[0] == 3 && metadata_active_mask[0] == 0);
+    p = test_pong(0);
+    assert(p.data[7] == ESB_PONG_FLAG_METADATA_REQUEST);
+    assert(p.data[8] == 3 && p.data[9] == 4 && p.data[10] == 0x56 && p.data[11] == 0x78);
+    assert_channel_confirm(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM), 84);
+    assert(metadata_active_mask[0] == 3 && metadata_active_chunk[0] == 4 &&
+           metadata_active_token[0] == 0x5678);
+    p = test_pong(0);
+    assert(p.data[7] == ESB_PONG_FLAG_METADATA_REQUEST);
+    assert(p.data[8] == 3 && p.data[9] == 4 && p.data[10] == 0x56 && p.data[11] == 0x78);
+    /* The unchanged eight-byte pairing ACK is still provisional. */
+    reset(1);
+    esb_pairing = true;
+    uint8_t pair[8] = {0, 1, 100};
+    pair[0] = crc8_ccitt(0x07, pair + 2, 6);
+    if (!pair[0]) pair[0] = 8;
+    struct esb_payload ack = {0};
+    bool has = false, suppress = false;
+    esb_ack_handler_cb(pair, sizeof(pair), 0, &ack, &has, &suppress);
+    assert(has && !suppress && ack.length == 8 && ack.data[1] == 0);
+    assert(ack.data[0] == pair[0] && !memcmp(ack.data + 2, receiver_device_addr, 6));
+}
 int main(void) {
+    test_channel_pongs();
     /* Production channel_apply discards queued old-home packets before
      * resetting admission, including storage-error rollback. */
     for (unsigned rollback = 0; rollback < 2; ++rollback) {
