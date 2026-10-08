@@ -14,6 +14,8 @@
 #include <hal/nrf_power.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/fatal.h>
+#include <zephyr/logging/log_ctrl.h>
 #if defined(CONFIG_BOOTLOADER_MCUBOOT)
 #include <zephyr/retention/bootmode.h>
 #endif
@@ -48,11 +50,83 @@ K_THREAD_DEFINE(button_thread_id, 1024, button_thread, NULL, NULL, NULL, BUTTON_
 #define ADAFRUIT_DFU_MAGIC_UF2_RESET 0x57
 #define ADAFRUIT_DFU_MAGIC_OTA_RESET 0xA8
 #define ADAFRUIT_DFU_MAGIC_SKIP 0x6D
+#define ADAFRUIT_RECOVERY_WDT_FIRST 0xE1
+#define ADAFRUIT_RECOVERY_WDT_SECOND 0xE2
+#define ADAFRUIT_RECOVERY_FATAL 0xE3
+#define ADAFRUIT_RECOVERY_CAPABILITY 0x52435631u
+#define ADAFRUIT_RECOVERY_ENABLED (CONFIG_SOC_SERIES_NRF52 && CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT)
+
+static uint32_t boot_reset_reason;
+#if ADAFRUIT_RECOVERY_ENABLED
+/* Captured before ESB reuses TIMER2; false also covers pre-init fatal errors. */
+static bool bootloader_supports_recovery;
+#endif
+extern void sys_arch_reboot(int type);
+
+static int sys_reset_reason_init(void)
+{
+#if ADAFRUIT_RECOVERY_ENABLED
+	bootloader_supports_recovery =
+		NRF_TIMER2->CC[1] == ADAFRUIT_RECOVERY_CAPABILITY;
+	NRF_TIMER2->CC[1] = 0;
+#endif
+#ifdef NRF_RESET
+	boot_reset_reason = NRF_RESET->RESETREAS;
+	NRF_RESET->RESETREAS = boot_reset_reason;
+#else
+	boot_reset_reason = NRF_POWER->RESETREAS;
+	NRF_POWER->RESETREAS = boot_reset_reason;
+#if ADAFRUIT_RECOVERY_ENABLED
+	if (bootloader_supports_recovery &&
+	    (NRF_POWER->GPREGRET == ADAFRUIT_RECOVERY_WDT_FIRST ||
+	     NRF_POWER->GPREGRET == ADAFRUIT_RECOVERY_WDT_SECOND)) {
+		/* The paired bootloader has already consumed the hardware DOG bit. */
+		boot_reset_reason |= POWER_RESETREAS_DOG_Msk;
+	}
+#endif
+#endif
+	return 0;
+}
+
+SYS_INIT(sys_reset_reason_init, PRE_KERNEL_1, 0);
+
+void sys_mark_boot_success(void)
+{
+#if ADAFRUIT_RECOVERY_ENABLED
+	if (!bootloader_supports_recovery) {
+		return;
+	}
+	unsigned int key = irq_lock();
+	if (NRF_POWER->GPREGRET == ADAFRUIT_RECOVERY_WDT_FIRST ||
+	    NRF_POWER->GPREGRET == ADAFRUIT_RECOVERY_WDT_SECOND) {
+		NRF_POWER->GPREGRET = 0;
+	}
+	irq_unlock(key);
+#endif
+}
+
+void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
+{
+	ARG_UNUSED(reason);
+	ARG_UNUSED(esf);
+#if ADAFRUIT_RECOVERY_ENABLED
+	NRF_POWER->GPREGRET = bootloader_supports_recovery ?
+		ADAFRUIT_RECOVERY_FATAL : ADAFRUIT_DFU_MAGIC_UF2_RESET;
+	__DSB();
+#else
+	LOG_PANIC();
+	LOG_ERR("Resetting system");
+#endif
+	sys_arch_reboot(SYS_REBOOT_COLD);
+	CODE_UNREACHABLE;
+}
 
 void sys_skip_dfu_marker(void)
 {
 #if DFU_EXISTS && !CONFIG_BOOTLOADER_MCUBOOT
-	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_SKIP; // Skip DFU
+	if (NRF_POWER->GPREGRET == 0) {
+		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_SKIP;
+	}
 #endif
 }
 
@@ -150,9 +224,9 @@ static struct gpio_callback button_cb_data;
 static int sys_button_init(void)
 {
 #ifdef NRF_RESET
-	bool reset_vbus_reset = NRF_RESET->RESETREAS & RESET_RESETREAS_VBUS_Msk;
+	bool reset_vbus_reset = boot_reset_reason & RESET_RESETREAS_VBUS_Msk;
 #else
-	bool reset_vbus_reset = NRF_POWER->RESETREAS & POWER_RESETREAS_VBUS_Msk;
+	bool reset_vbus_reset = boot_reset_reason & POWER_RESETREAS_VBUS_Msk;
 #endif
 	gpio_pin_configure_dt(&button0, GPIO_INPUT);
 	gpio_pin_interrupt_configure_dt(&button0, GPIO_INT_EDGE_BOTH);

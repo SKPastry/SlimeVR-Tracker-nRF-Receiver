@@ -34,10 +34,16 @@
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
-#if defined(CONFIG_BOOTLOADER_MCUBOOT)
-static void mcuboot_confirm_thread(void)
+static void boot_confirm_after_healthy_uptime(void)
 {
-	k_sleep(K_SECONDS(60));
+#if defined(CONFIG_BOOTLOADER_MCUBOOT) || \
+	(CONFIG_SOC_SERIES_NRF52 && CONFIG_BUILD_OUTPUT_UF2)
+	int64_t remaining_ms = 60000 - k_uptime_get();
+	if (remaining_ms > 0) {
+		k_sleep(K_MSEC(remaining_ms));
+	}
+	sys_mark_boot_success();
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
 	if (!boot_is_img_confirmed()) {
 		int err = boot_write_img_confirmed();
 		if (err) {
@@ -46,11 +52,9 @@ static void mcuboot_confirm_thread(void)
 			LOG_INF("MCUboot test image confirmed");
 		}
 	}
-}
-
-K_THREAD_DEFINE(mcuboot_confirm_thread_id, 512, mcuboot_confirm_thread,
-		NULL, NULL, NULL, 10, 0, 0);
 #endif
+#endif
+}
 
 int main(void)
 {
@@ -95,6 +99,7 @@ int main(void)
 
 	// Clear boot LED priority
 	set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_BOOT);
+	boot_confirm_after_healthy_uptime();
 
 	return 0;
 }

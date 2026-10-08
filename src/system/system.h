@@ -33,7 +33,10 @@ void sys_request_system_reboot(void);
 
 /* Enter bootloader DFU (UF2 default, or OTA when ota=true on Adafruit BL). */
 void sys_enter_dfu(bool ota);
-/* Mark next reboot to skip Adafruit double-reset DFU entry. */
+/* Mark next reboot to skip DFU only when no bootloader request is pending. */
 void sys_skip_dfu_marker(void);
+/* Acknowledge healthy uptime only for a capability-advertising bootloader,
+ * without replacing pending DFU/fatal requests or legacy marker values. */
+void sys_mark_boot_success(void);
 
 #endif
