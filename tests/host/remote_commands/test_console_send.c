@@ -49,6 +49,13 @@ static void test_wom_commands(void)
         console_handle_send(targets[i], "wom", "off", NULL, NULL);
         console_handle_send(targets[i], "wom", "timeout", "1", "extra");
         assert(requests == 4);
+        console_handle_send(targets[i], "wom", "enter", NULL, NULL);
+        assert(requests == 5 && last_minutes == ESB_WOM_ENTER && last_target == (i ? 255 : 0));
+        console_handle_send(targets[i], "wom", "enter", "0", NULL);
+        console_handle_send(targets[i], "wom", "enter", "", NULL);
+        console_handle_send(targets[i], "wom", "enter", NULL, "extra");
+        console_handle_send(targets[i], "wom", "enter", "1", "extra");
+        assert(requests == 5);
     }
 }
 

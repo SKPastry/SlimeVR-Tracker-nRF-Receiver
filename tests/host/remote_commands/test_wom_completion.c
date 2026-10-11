@@ -134,6 +134,37 @@ int main(void)
     assert(rcv_cmd_remote_wom_command(2, ESB_WOM_TIMEOUT_CLEAR) == RCV_HID_ST_STARTED);
     reply(2, 0, EIO); remote_wom_poll();
     assert(strstr(console_output, "error 5") && !strstr(console_output, "restored"));
+    request[5] = 0xfe; request[6] = 0xff;
+    assert(hid_wom(request, 3) == RCV_HID_ST_STARTED && sent_minutes == ESB_WOM_ENTER);
+    before = ack_count;
+    on_remote_confirm(2, ESB_PONG_FLAG_WOM_CONTROL);
+    remote_wom_poll(); assert(ack_count == before && remote_hid_pending);
+    reply(2, ESB_WOM_ENTER, 0); available_token[2]--;
+    remote_wom_poll(); assert(ack_count == before && remote_hid_pending);
+    available_token[2]++;
+    remote_wom_poll();
+    assert(ack_count == before + 2 && !remote_hid_pending);
+    assert(sys_get_le16(&acks[before][6]) == ESB_WOM_ENTER &&
+           sys_get_le16(&acks[before][8]) == 0 && acks[before + 1][3] == RCV_HID_ST_OK);
+    before = sends;
+    assert(remote_wom_begin(8, 255, ESB_WOM_ENTER, false) == RCV_HID_ST_STARTED);
+    assert(submitted == 3 && sends == before && remote_wom_minutes == ESB_WOM_ENTER);
+    remote_hid_expected = esb_send_remote_wom_command(255, remote_wom_minutes, &remote_wom_token);
+    remote_wom_deadline = now + 5000;
+    before = ack_count;
+    reply(2, ESB_WOM_ENTER, 0); reply(5, 0, EBUSY); remote_wom_poll();
+    assert(!remote_hid_pending && ack_count == before + 3);
+    assert(acks[before + 2][3] == RCV_HID_ST_ENOENT &&
+           acks[before + 2][7] == BIT(2) && acks[before + 2][11] == BIT(5));
+    console_used = 0; console_output[0] = 0;
+    assert(rcv_cmd_remote_wom_command(2, ESB_WOM_ENTER) == RCV_HID_ST_STARTED);
+    reply(2, ESB_WOM_ENTER, 0); remote_wom_poll();
+    assert(strstr(console_output, "WOM entry accepted") &&
+           !strstr(console_output, "minutes") && !strstr(console_output, "asleep"));
+    console_used = 0; console_output[0] = 0;
+    assert(rcv_cmd_remote_wom_command(2, ESB_WOM_ENTER) == RCV_HID_ST_STARTED);
+    reply(2, 0, ENOTSUP); remote_wom_poll();
+    assert(strstr(console_output, "error") && !strstr(console_output, "accepted"));
     request[3] = 1; assert(hid_wom(request, 3) == RCV_HID_ST_EINVAL);
     puts("WOM job: exact token, false ACK, busy, deferred all, errors, timeout, terminal-only");
     return 0;

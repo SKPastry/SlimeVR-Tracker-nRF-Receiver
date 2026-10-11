@@ -82,11 +82,12 @@
 #define RCV_HID_CMD_LEN 16
 
 /* WOM request: target [4], LE16 operation [5:7] (0=query, 1..35791=minutes,
- * ESB_WOM_TIMEOUT_CLEAR=clear saved override and restore exact firmware default).
+ * ESB_WOM_TIMEOUT_CLEAR=clear saved override and restore exact firmware default,
+ * ESB_WOM_ENTER=request immediate WOM admission).
  * ACK result: STARTED, kind [4]=1, id [5], LE16 value [6:8],
  * LE16 errno [8:10], LE16 receiver token [10:12].
- * Value=0 with errno=0 confirms clear. Otherwise value is timeout minutes;
- * nonzero errno is failure.
+ * Value=0 with errno=0 confirms clear; ESB_WOM_ENTER confirms entry admission,
+ * not physical sleep. Otherwise value is timeout minutes; nonzero errno is failure.
  * ACK summary: OK/ENOENT, kind [4]=2, LE16 token [5:7],
  * LE32 success mask [7:11], LE32 failure mask [11:15].
  * Unused bytes are zero. All targets uses the active-tracker scan.

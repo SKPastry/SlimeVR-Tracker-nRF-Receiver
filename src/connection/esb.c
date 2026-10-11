@@ -1333,7 +1333,8 @@ static void remote_wom_receive(uint8_t id, uint8_t flag, const uint8_t data[4], 
 	    token != 0 && token == wom_token[id] && !wom_complete[id] &&
 	    wom_advertised[id] && counter != wom_first_ping_counter[id]) {
 		bool success = flag == ESB_PING_FLAG_WOM_RESULT &&
-			(wom_minutes[id] == ESB_WOM_TIMEOUT_CLEAR ? value == 0 :
+			(wom_minutes[id] == ESB_WOM_ENTER ? value == ESB_WOM_ENTER :
+			 wom_minutes[id] == ESB_WOM_TIMEOUT_CLEAR ? value == 0 :
 			 (value >= 1 && value <= ESB_WOM_TIMEOUT_MAX_MINUTES &&
 			  (wom_minutes[id] == 0 || wom_minutes[id] == value)));
 		bool failure = flag == ESB_PING_FLAG_WOM_ERROR && value != 0;
@@ -3444,7 +3445,7 @@ uint32_t esb_send_remote_wom_command(uint8_t target_id, uint16_t minutes, uint16
 {
 	if (token_out == NULL ||
 	    (minutes > ESB_WOM_TIMEOUT_MAX_MINUTES &&
-	     minutes != ESB_WOM_TIMEOUT_CLEAR) ||
+	     minutes != ESB_WOM_TIMEOUT_CLEAR && minutes != ESB_WOM_ENTER) ||
 	    (target_id != 0xff && target_id >= MAX_TRACKERS)) {
 		return 0;
 	}

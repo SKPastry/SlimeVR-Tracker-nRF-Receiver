@@ -441,6 +441,8 @@ static void remote_wom_result(uint8_t id, uint16_t minutes, uint16_t error)
 			printk("Tracker %u WOM command: timed out (offline or unsupported)\n", id);
 		} else if (error) {
 			printk("Tracker %u WOM command: error %u\n", id, error);
+		} else if (minutes == ESB_WOM_ENTER) {
+			printk("Tracker %u WOM entry accepted\n", id);
 		} else if (minutes == 0) {
 			printk("Tracker %u WOM normal timeout: restored firmware default\n", id);
 		} else {
@@ -601,7 +603,7 @@ static uint8_t remote_hid_begin(uint8_t seq, uint8_t opcode, uint8_t flag)
 static uint8_t remote_wom_begin(uint8_t seq, uint8_t target, uint16_t minutes, bool console)
 {
 	if ((minutes > ESB_WOM_TIMEOUT_MAX_MINUTES &&
-	     minutes != ESB_WOM_TIMEOUT_CLEAR) ||
+	     minutes != ESB_WOM_TIMEOUT_CLEAR && minutes != ESB_WOM_ENTER) ||
 	    (target != RCV_HID_TARGET_ALL && target >= MAX_TRACKERS)) {
 		return RCV_HID_ST_EINVAL;
 	}

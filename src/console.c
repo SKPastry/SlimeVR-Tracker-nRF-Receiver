@@ -299,6 +299,7 @@ static void print_help(void)
 		"      send all sens reset      Reset sensitivity for all\n"
 		"      send 1 reset zro         Reset ZRO calibration on tracker 1\n"
 		"      send all ping            Ping all active trackers\n"
+		"      send all wom enter      Request WOM now (accepted does not mean asleep)\n"
 		"      send 0 wom timeout      Query normal WOM timeout in minutes\n"
 		"      send all wom timeout 10 Set normal timeout (1-35791 minutes)\n"
 		"      send all wom timeout 0  Clear saved override; restore firmware default\n"

@@ -53,7 +53,7 @@ prelude, cases = fixture.split("/* PRODUCTION BODIES */")
 # confirmation priority, command formats, OTA override and CRC generation.
 defines = []
 for line in header.splitlines():
-    match = re.match(r"#define (ESB_(?:PING|PONG|RAW|OTA|CHANNEL_CONFIRM|WOM_TIMEOUT)_\w+)\s+", line)
+    match = re.match(r"#define (ESB_(?:(?:PING|PONG|RAW|OTA|CHANNEL_CONFIRM|WOM_TIMEOUT)_\w+|WOM_ENTER))\s+", line)
     if match and not re.search(r"#define\s+" + match[1] + r"\b", prelude):
         defines.append(line)
 prelude = "\n".join(defines) + "\n" + prelude

@@ -45,7 +45,8 @@ uint8_t rcv_cmd_remote_flag(uint8_t target_id, uint8_t pong_flag);
 uint8_t rcv_cmd_remote_test_on(uint8_t target_id, uint16_t tps);
 /* Queue TEST_MODE_OFF. */
 uint8_t rcv_cmd_remote_test_off(uint8_t target_id);
-/* Async terminal WOM query (0), set (1..35791), clear (ESB_WOM_TIMEOUT_CLEAR).
+/* Async terminal WOM query (0), set (1..35791), clear (ESB_WOM_TIMEOUT_CLEAR),
+ * or entry (ESB_WOM_ENTER). Success for entry means admission, not sleep.
  * Shares the HID remote job; all targets uses the active-tracker scan. */
 uint8_t rcv_cmd_remote_wom_command(uint8_t target_id, uint16_t minutes);
 

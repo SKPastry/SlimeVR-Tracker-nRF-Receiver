@@ -64,6 +64,28 @@ class CalibrationSend(unittest.TestCase):
 
 
 class WomSend(unittest.TestCase):
+    def test_enter(self):
+        for target, tid in (("0", 0), ("7", 7), ("all", 255)):
+            self.assertEqual(sender.build_send(target, ["wom", "enter"]),
+                             (0x28, bytes([tid, 0xfe, 0xff])))
+        for rest in (["enter", "0"], ["enter", "extra"], ["enter", "1", "extra"]):
+            with self.assertRaises(ValueError):
+                sender.build_send("all", ["wom"] + rest)
+
+    def test_enter_result_rendering(self):
+        result = bytes([1, 3, 0xfe, 0xff, 0, 0, 9, 0, 0, 0, 0, 0])
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            sender.print_wom_result(result)
+        self.assertIn("WOM entry accepted", captured.getvalue())
+        self.assertNotIn("minutes", captured.getvalue())
+        self.assertNotIn("asleep", captured.getvalue())
+        error = bytearray(result)
+        error[4] = 16
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            sender.print_wom_result(bytes(error))
+        self.assertIn("error 16", captured.getvalue())
+        self.assertNotIn("accepted", captured.getvalue())
+
     def test_query_set_and_clear(self):
         for target, tid in (("0", 0), ("all", 255)):
             for rest, value in (([], 0), (["0"], 0xffff), (["1"], 1), (["35791"], 35791)):
