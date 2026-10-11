@@ -112,6 +112,11 @@ static inline uint8_t esb_rf_channel_decode(uint8_t stored)
 #define ESB_PONG_FLAG_DATA_COLLECT_ON 0x22  // Start raw data collection
 #define ESB_PONG_FLAG_DATA_COLLECT_OFF 0x23 // Stop raw data collection
 #define ESB_PONG_FLAG_SENS_AUTO 0x24        // Auto-calibrate gyro sensitivity
+#define ESB_PONG_FLAG_WOM_CONTROL 0x28
+#define ESB_PING_FLAG_WOM_RESULT 0x29
+#define ESB_PING_FLAG_WOM_ERROR 0x2A
+#define ESB_WOM_TIMEOUT_MAX_MINUTES 35791
+#define ESB_WOM_TIMEOUT_CLEAR 0xffff
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON 0x34  // Start batch raw data collection (data[8] = target Hz)
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF 0x35 // Stop batch raw data collection
 #define ESB_PONG_FLAG_METADATA_REQUEST 0x36 // Request selected metadata section/chunk
@@ -205,6 +210,14 @@ bool esb_get_stats_detailed_enabled(void);              // Get current status
 uint32_t esb_get_stats_detailed_remaining(void);        // Get remaining time (0 if no auto-disable)
 
 // Remote command API
+/* WOM control: 0=query, 1..35791=set, ESB_WOM_TIMEOUT_CLEAR=clear override.
+ * target=0xff scans active slots (~1s). One fresh nonzero token per request;
+ * zero mask means no admitted target. */
+uint32_t esb_send_remote_wom_command(uint8_t target_id, uint16_t minutes, uint16_t *token_out);
+/* Exact transaction outcome; positive errno on failure, value=0 on successful clear,
+ * otherwise timeout minutes. */
+bool esb_get_remote_wom_result(uint8_t id, uint16_t token, uint16_t *minutes, uint16_t *error);
+void esb_cancel_remote_wom_command(uint32_t mask, uint16_t token);
 void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag);
 /* Clear only a pending OTA abort command; preserves unrelated commands. */
 void esb_clear_remote_ota_abort(uint8_t tracker_id);

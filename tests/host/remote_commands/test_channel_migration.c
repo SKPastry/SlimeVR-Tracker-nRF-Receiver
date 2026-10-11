@@ -47,6 +47,8 @@ static void k_mutex_lock(int *m, int timeout) { assert(!*m); *m = 1; }
 static void k_mutex_unlock(int *m) { assert(*m); *m = 0; }
 static int64_t now;
 static int64_t k_uptime_get(void) { return now; }
+static void k_msleep(int32_t ms) { now += ms; }
+#define REMOTE_COMMAND_ACTIVE_SCAN_MS 1000
 static bool ota, self_ota, collecting, batch, abort_pending[MAX_TRACKERS];
 static bool esb_ota_relay_is_active(void) { return ota; }
 static bool receiver_ota_is_active(void) { return self_ota; }
@@ -126,6 +128,10 @@ static uint32_t tdma_config_packed[MAX_TRACKERS];
 static uint8_t metadata_active_mask[MAX_TRACKERS], metadata_pending_mask[MAX_TRACKERS];
 static uint8_t metadata_active_chunk[MAX_TRACKERS], metadata_pending_chunk[MAX_TRACKERS];
 static uint16_t metadata_active_token[MAX_TRACKERS], metadata_pending_token[MAX_TRACKERS];
+static bool wom_advertised[MAX_TRACKERS];
+static uint8_t wom_first_ping_counter[MAX_TRACKERS];
+static uint16_t wom_next_token, wom_token[MAX_TRACKERS], wom_minutes[MAX_TRACKERS], wom_error[MAX_TRACKERS];
+static bool wom_complete[MAX_TRACKERS];
 static int16_t pending_sens_data[MAX_TRACKERS][3];
 static uint8_t pending_sens_auto_axis[MAX_TRACKERS];
 static uint16_t pending_sens_auto_revolutions[MAX_TRACKERS];
@@ -331,7 +337,154 @@ static void test_channel_pongs(void) {
     assert(has && !suppress && ack.length == 8 && ack.data[1] == 0);
     assert(ack.data[0] == pair[0] && !memcmp(ack.data + 2, receiver_device_addr, 6));
 }
+static void test_wom_timeouts(void) {
+    reset(3);
+    uint16_t token, next, minutes = 999, error = 999;
+    assert(esb_send_remote_wom_command(0, 35792, &token) == 0);
+    assert(esb_send_remote_wom_command(16, 10, &token) == 0);
+    assert(esb_send_remote_wom_command(3, 10, &token) == 0);
+    assert(esb_send_remote_wom_command(0, 10, &token) == BIT(0) && token != 0);
+    struct esb_payload p = test_pong(0);
+    assert(p.data[7] == ESB_PONG_FLAG_WOM_CONTROL);
+    assert(p.data[3] == 0x12 && p.data[4] == 0x34 && p.data[5] == 0x56 && p.data[6] == 0x78);
+    assert(p.data[8] == 0 && p.data[9] == 10 && p.data[10] == (token >> 8) && p.data[11] == (token & 255));
+    assert(test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM).data[7] == ESB_PONG_FLAG_CHANNEL_CONFIRM);
+    assert(wom_token[0] == token && tracker_remote_command[0] == ESB_PONG_FLAG_WOM_CONTROL);
+    uint8_t reply[4] = {0, 10, token >> 8, token & 255};
+    echo(0, ESB_PONG_FLAG_WOM_CONTROL);
+    assert(tracker_remote_command[0] == ESB_PONG_FLAG_WOM_CONTROL);
+    remote_wom_receive(0, ESB_PONG_FLAG_WOM_CONTROL, reply, 8);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    reply[1] = 0;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    reply[1] = 10;
+    reply[3] ^= 1;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    reply[3] ^= 1; reply[1] = 11;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    reply[1] = 10;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 7);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
+    assert(esb_get_remote_wom_result(0, token, &minutes, &error) && minutes == 10 && error == 0);
+    reply[1] = EIO;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_ERROR, reply, 8);
+    assert(esb_get_remote_wom_result(0, token, &minutes, &error) && minutes == 10 && error == 0);
+    assert(esb_send_remote_wom_command(0, 0, &next) == BIT(0) && next != token);
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
+    assert(!esb_get_remote_wom_result(0, next, &minutes, &error));
+    esb_cancel_remote_wom_command(BIT(0), token);
+    assert(wom_token[0] == next);
+    test_pong(0);
+    reply[0] = 0; reply[1] = 0; reply[2] = next >> 8; reply[3] = next & 255;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_ERROR, reply, 8);
+    assert(!esb_get_remote_wom_result(0, next, &minutes, &error));
+    reply[0] = 0x8b; reply[1] = 0xd0;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
+    assert(!esb_get_remote_wom_result(0, next, &minutes, &error));
+    reply[0] = 0x8b; reply[1] = 0xcf; reply[2] = next >> 8; reply[3] = next & 255;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
+    assert(esb_get_remote_wom_result(0, next, &minutes, &error) && minutes == 35791 && error == 0);
+    assert(esb_send_remote_wom_command(0, 1, &token) == BIT(0));
+    test_pong(0);
+    reply[0] = 0; reply[1] = EIO; reply[2] = token >> 8; reply[3] = token & 255;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_ERROR, reply, 8);
+    assert(esb_get_remote_wom_result(0, token, &minutes, &error) && minutes == 0 && error == EIO);
+    assert(esb_send_remote_wom_command(0, 1, &token) == BIT(0));
+    esb_send_remote_command(0, ESB_PONG_FLAG_MEOW);
+    assert(esb_get_remote_wom_result(0, token, &minutes, &error) && error == ECANCELED);
+    esb_cancel_remote_wom_command(BIT(0), token);
+    assert(tracker_remote_command[0] == ESB_PONG_FLAG_MEOW && wom_token[0] == 0);
+    wom_next_token = UINT16_MAX;
+    assert(esb_send_remote_wom_command(0, 1, &token) == BIT(0) && token == 1);
+    tracker_stats[0].last_packet_time = now + 1000;
+    tracker_stats[1].last_packet_time = now - 1;
+    tracker_stats[2].last_packet_time = now + 1000;
+    assert(esb_send_remote_wom_command(255, 0, &token) == (BIT(0) | BIT(2)));
+    assert(wom_token[0] == token && wom_token[2] == token);
+    esb_cancel_remote_wom_command(BIT(0) | BIT(2), token);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    /* A rebooted receiver can reuse a cached tracker token. The first incoming
+     * RESULT predates the request carried by its own ACK: it is not proof. */
+    wom_next_token = 0;
+    assert(esb_send_remote_wom_command(0, 0, &token) == BIT(0) && token == 1);
+    uint8_t stale[13] = {ESB_PING_TYPE, 0, 41, 0, 0, 0, 0,
+                        ESB_PING_FLAG_WOM_RESULT, 0, 10, 0, 1, 0};
+    remote_wom_receive(0, stale[7], &stale[8], stale[2]);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    test_pong(ESB_PING_FLAG_CHANNEL_CONFIRM);
+    assert(!wom_advertised[0]);
+    abort_pending[0] = true;
+    test_pong(0);
+    assert(!wom_advertised[0]);
+    abort_pending[0] = false;
+    struct esb_payload ack = {0};
+    bool has = false, suppress = false;
+    uint8_t ota_ping[13] = {ESB_PING_TYPE, 0, 40};
+    ota_ping[12] = crc8_ccitt(0x07, ota_ping, 12);
+    ota = ota_target = ota_payload = true;
+    esb_ack_handler_cb(ota_ping, sizeof(ota_ping), 1, &ack, &has, &suppress);
+    assert(has && ack.length == 17 && ack.data[0] == 0xAB && !wom_advertised[0]);
+    ota = ota_target = ota_payload = false;
+    stale[12] = crc8_ccitt(0x07, stale, 12);
+    esb_ack_handler_cb(stale, sizeof(stale), 1, &ack, &has, &suppress);
+    assert(has && ack.data[7] == ESB_PONG_FLAG_NORMAL && !wom_advertised[0]);
+    remote_wom_receive(0, stale[7], &stale[8], stale[2]);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    stale[7] = ESB_PING_FLAG_WOM_ERROR;
+    stale[12] = crc8_ccitt(0x07, stale, 12);
+    esb_ack_handler_cb(stale, sizeof(stale), 1, &ack, &has, &suppress);
+    assert(ack.data[7] == ESB_PONG_FLAG_NORMAL && !wom_advertised[0]);
+    remote_wom_receive(0, stale[7], &stale[8], stale[2]);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    stale[7] = ESB_PONG_FLAG_NORMAL;
+    stale[12] = crc8_ccitt(0x07, stale, 12);
+    esb_ack_handler_cb(stale, sizeof(stale), 1, &ack, &has, &suppress);
+    assert(ack.data[7] == ESB_PONG_FLAG_WOM_CONTROL && wom_first_ping_counter[0] == 41);
+    stale[7] = ESB_PING_FLAG_WOM_RESULT;
+    remote_wom_receive(0, stale[7], &stale[8], stale[2]);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    /* Repeated request encoding must retain the FIRST counter. */
+    stale[2]++;
+    stale[9] = 20;
+    stale[12] = crc8_ccitt(0x07, stale, 12);
+    esb_ack_handler_cb(stale, sizeof(stale), 1, &ack, &has, &suppress);
+    assert(wom_first_ping_counter[0] == 41);
+    remote_wom_receive(0, stale[7], &stale[8], stale[2]);
+    assert(esb_get_remote_wom_result(0, token, &minutes, &error) && minutes == 20 && !error);
+    assert(esb_send_remote_wom_command(0, ESB_WOM_TIMEOUT_CLEAR, &token) == BIT(0));
+    reply[0] = reply[1] = 0; reply[2] = token >> 8; reply[3] = token & 255;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    p = test_pong(0);
+    assert(p.data[8] == 255 && p.data[9] == 255);
+    remote_wom_receive(0, ESB_PONG_FLAG_WOM_CONTROL, reply, 8);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    reply[1] = 10;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    reply[1] = 0; reply[3] ^= 1;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    reply[3] ^= 1;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 7);
+    assert(!esb_get_remote_wom_result(0, token, &minutes, &error));
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_RESULT, reply, 8);
+    assert(esb_get_remote_wom_result(0, token, &minutes, &error) && !minutes && !error);
+    assert(esb_send_remote_wom_command(0, ESB_WOM_TIMEOUT_CLEAR, &token) == BIT(0));
+    test_pong(0);
+    reply[1] = EIO; reply[2] = token >> 8; reply[3] = token & 255;
+    remote_wom_receive(0, ESB_PING_FLAG_WOM_ERROR, reply, 8);
+    assert(esb_get_remote_wom_result(0, token, &minutes, &error) && !minutes && error == EIO);
+    assert(esb_send_remote_wom_command(255, ESB_WOM_TIMEOUT_CLEAR, &token) == (BIT(0) | BIT(2)));
+    assert(wom_minutes[0] == ESB_WOM_TIMEOUT_CLEAR && wom_minutes[2] == ESB_WOM_TIMEOUT_CLEAR);
+}
 int main(void) {
+    test_wom_timeouts();
     test_channel_pongs();
     /* Production channel_apply discards queued old-home packets before
      * resetting admission, including storage-error rollback. */

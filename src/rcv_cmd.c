@@ -366,6 +366,11 @@ static uint8_t remote_hid_opcode;
 static uint8_t remote_hid_flag;
 static atomic_t remote_hid_expected = ATOMIC_INIT(0);
 static atomic_t remote_hid_confirmed = ATOMIC_INIT(0);
+static bool remote_wom_console;
+static uint16_t remote_wom_token;
+static uint32_t remote_wom_failed;
+static int64_t remote_wom_deadline;
+static uint16_t remote_wom_minutes;
 
 enum remote_hid_job {
 	REMOTE_HID_JOB_NONE = 0,
@@ -373,6 +378,7 @@ enum remote_hid_job {
 	REMOTE_HID_JOB_SENS_AUTO_ALL,
 	REMOTE_HID_JOB_TEST_ON_ALL,
 	REMOTE_HID_JOB_TEST_OFF_ALL,
+	REMOTE_HID_JOB_WOM_COMMAND,
 };
 
 static enum remote_hid_job remote_hid_job;
@@ -428,10 +434,88 @@ static void remote_hid_arm_expected(uint32_t mask)
 	(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(REMOTE_HID_CONFIRM_TIMEOUT_MS));
 }
 
+static void remote_wom_result(uint8_t id, uint16_t minutes, uint16_t error)
+{
+	if (remote_wom_console) {
+		if (error == ETIMEDOUT) {
+			printk("Tracker %u WOM command: timed out (offline or unsupported)\n", id);
+		} else if (error) {
+			printk("Tracker %u WOM command: error %u\n", id, error);
+		} else if (minutes == 0) {
+			printk("Tracker %u WOM normal timeout: restored firmware default\n", id);
+		} else {
+			printk("Tracker %u WOM normal timeout: %u minutes\n", id, minutes);
+		}
+	} else if (async_ack_fn) {
+		uint8_t ack[RCV_HID_CMD_LEN];
+		fill_ack(ack, remote_hid_seq, remote_hid_opcode, RCV_HID_ST_STARTED);
+		ack[4] = RCV_HID_WOM_RESULT;
+		ack[5] = id;
+		sys_put_le16(error ? 0 : minutes, &ack[6]);
+		sys_put_le16(error, &ack[8]);
+		sys_put_le16(remote_wom_token, &ack[10]);
+		async_ack_fn(ack);
+	}
+}
+
+static void remote_wom_poll(void)
+{
+	uint32_t expected = (uint32_t)atomic_get(&remote_hid_expected);
+	uint32_t confirmed = (uint32_t)atomic_get(&remote_hid_confirmed);
+	bool expired = k_uptime_get() >= remote_wom_deadline;
+	for (uint8_t id = 0; id < MAX_TRACKERS; id++) {
+		uint32_t bit = BIT(id);
+		if (!(expected & bit) || ((confirmed | remote_wom_failed) & bit)) {
+			continue;
+		}
+		uint16_t minutes = 0, error = 0;
+		if (!esb_get_remote_wom_result(id, remote_wom_token, &minutes, &error)) {
+			if (!expired) {
+				continue;
+			}
+			error = ETIMEDOUT;
+		}
+		if (error) {
+			remote_wom_failed |= bit;
+		} else {
+			confirmed |= bit;
+		}
+		remote_wom_result(id, minutes, error);
+	}
+	atomic_set(&remote_hid_confirmed, confirmed);
+	if ((confirmed | remote_wom_failed) != expected) {
+		(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(50));
+		return;
+	}
+	esb_cancel_remote_wom_command(expected, remote_wom_token);
+	if (remote_wom_console) {
+		if (!expected) {
+			printk("WOM command: no active trackers found\n");
+		}
+		printk("WOM command complete: success mask 0x%08X, failure mask 0x%08X\n",
+		       confirmed, remote_wom_failed);
+	} else if (async_ack_fn) {
+		uint8_t ack[RCV_HID_CMD_LEN];
+		fill_ack(ack, remote_hid_seq, remote_hid_opcode,
+			 remote_wom_failed || !expected ? RCV_HID_ST_ENOENT : RCV_HID_ST_OK);
+		ack[4] = RCV_HID_WOM_SUMMARY;
+		sys_put_le16(remote_wom_token, &ack[5]);
+		sys_put_le32(confirmed, &ack[7]);
+		sys_put_le32(remote_wom_failed, &ack[11]);
+		async_ack_fn(ack);
+	}
+	remote_hid_job = REMOTE_HID_JOB_NONE;
+	atomic_set(&remote_hid_pending, 0);
+}
+
 static void remote_hid_timeout_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 	if (!atomic_get(&remote_hid_pending)) {
+		return;
+	}
+	if (remote_hid_job == REMOTE_HID_JOB_WOM_COMMAND) {
+		remote_wom_poll();
 		return;
 	}
 	uint32_t expected = (uint32_t)atomic_get(&remote_hid_expected);
@@ -462,6 +546,13 @@ static void remote_hid_job_handler(struct k_work *work)
 	case REMOTE_HID_JOB_TEST_OFF_ALL:
 		mask = esb_send_remote_command_test_off_all();
 		break;
+	case REMOTE_HID_JOB_WOM_COMMAND:
+		mask = esb_send_remote_wom_command(RCV_HID_TARGET_ALL, remote_wom_minutes,
+						   &remote_wom_token);
+		atomic_set(&remote_hid_expected, mask);
+		remote_wom_deadline = k_uptime_get() + REMOTE_HID_CONFIRM_TIMEOUT_MS;
+		(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(50));
+		return;
 	default:
 		remote_hid_finish(RCV_HID_ST_EINVAL);
 		return;
@@ -473,6 +564,9 @@ static void on_remote_confirm(uint8_t tracker_id, uint8_t flag)
 {
 	if (!atomic_get(&remote_hid_pending)) {
 		return;
+	}
+	if (flag == ESB_PONG_FLAG_WOM_CONTROL) {
+		return; /* A legacy flag echo is never a committed WOM result. */
 	}
 	if (flag != remote_hid_flag || tracker_id >= MAX_TRACKERS) {
 		return;
@@ -502,6 +596,43 @@ static uint8_t remote_hid_begin(uint8_t seq, uint8_t opcode, uint8_t flag)
 	atomic_set(&remote_hid_expected, 0);
 	atomic_set(&remote_hid_confirmed, 0);
 	return RCV_HID_ST_STARTED;
+}
+
+static uint8_t remote_wom_begin(uint8_t seq, uint8_t target, uint16_t minutes, bool console)
+{
+	if ((minutes > ESB_WOM_TIMEOUT_MAX_MINUTES &&
+	     minutes != ESB_WOM_TIMEOUT_CLEAR) ||
+	    (target != RCV_HID_TARGET_ALL && target >= MAX_TRACKERS)) {
+		return RCV_HID_ST_EINVAL;
+	}
+	uint8_t status = remote_hid_begin(seq, ESB_PONG_FLAG_WOM_CONTROL,
+					ESB_PONG_FLAG_WOM_CONTROL);
+	if (status != RCV_HID_ST_STARTED) {
+		return status;
+	}
+	remote_hid_job = REMOTE_HID_JOB_WOM_COMMAND;
+	remote_wom_console = console;
+	remote_wom_failed = 0;
+	remote_wom_token = 0;
+	if (target == RCV_HID_TARGET_ALL) {
+		remote_wom_minutes = minutes;
+		k_work_submit_to_queue(&rssi_wq, &remote_hid_job_work);
+		return RCV_HID_ST_STARTED;
+	}
+	uint32_t mask = esb_send_remote_wom_command(target, minutes, &remote_wom_token);
+	if (!mask) {
+		remote_hid_abort();
+		return RCV_HID_ST_ENOENT;
+	}
+	atomic_set(&remote_hid_expected, mask);
+	remote_wom_deadline = k_uptime_get() + REMOTE_HID_CONFIRM_TIMEOUT_MS;
+	(void)k_work_reschedule(&remote_hid_timeout_work, K_MSEC(50));
+	return RCV_HID_ST_STARTED;
+}
+
+uint8_t rcv_cmd_remote_wom_command(uint8_t target_id, uint16_t minutes)
+{
+	return remote_wom_begin(0, target_id, minutes, true);
 }
 
 static uint8_t rcv_cmd_remote_flag_hid(uint8_t seq, uint8_t opcode, uint8_t target_id, uint8_t pong_flag)
@@ -735,6 +866,7 @@ uint8_t rcv_cmd_remote_flag(uint8_t target_id, uint8_t pong_flag)
 		return rcv_cmd_collect_batch_stop();
 	}
 	if (pong_flag == ESB_PONG_FLAG_SET_CHANNEL || pong_flag == ESB_PONG_FLAG_CLEAR_CHANNEL ||
+	    pong_flag == ESB_PONG_FLAG_WOM_CONTROL ||
 	    pong_flag == ESB_PONG_FLAG_TEST_MODE_ON || pong_flag == ESB_PONG_FLAG_TEST_MODE_OFF) {
 		/* Test flags carry TPS state; the generic path would keep a stale
 		 * rate. Callers must use rcv_cmd_remote_test_on/off. */
@@ -849,7 +981,14 @@ bool rcv_cmd_process_hid(const uint8_t *buf, size_t len, uint32_t usb_generation
 
 	if (rcv_hid_opcode_is_pong_flag(opcode)) {
 		uint8_t target = (args_len >= 1) ? args[0] : RCV_HID_TARGET_ALL;
-		if (opcode == ESB_PONG_FLAG_SENS_SET) {
+		if (opcode == ESB_PONG_FLAG_WOM_CONTROL) {
+			bool valid = args_len >= 3 && buf[3] == 0;
+			for (size_t i = 3; i < args_len; i++) {
+				valid = valid && args[i] == 0;
+			}
+			status = valid ? remote_wom_begin(seq, target, sys_get_le16(&args[1]), false)
+				       : RCV_HID_ST_EINVAL;
+		} else if (opcode == ESB_PONG_FLAG_SENS_SET) {
 			if (args_len < 7) {
 				status = RCV_HID_ST_EINVAL;
 			} else {

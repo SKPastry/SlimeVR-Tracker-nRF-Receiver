@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise remote calibration parser boundaries without USB or radio hardware."""
 import importlib.util
+import contextlib
+import io
 import os
 from pathlib import Path
 import shlex
@@ -61,6 +63,51 @@ class CalibrationSend(unittest.TestCase):
                         sender.build_send(target, tokens)
 
 
+class WomSend(unittest.TestCase):
+    def test_query_set_and_clear(self):
+        for target, tid in (("0", 0), ("all", 255)):
+            for rest, value in (([], 0), (["0"], 0xffff), (["1"], 1), (["35791"], 35791)):
+                self.assertEqual(sender.build_send(target, ["wom", "timeout"] + rest),
+                                 (0x28, bytes([tid]) + value.to_bytes(2, "little")))
+
+    def test_invalid_minutes(self):
+        for rest in ([], ["off"], ["timeout", "1", "extra"]):
+            with self.assertRaises(ValueError):
+                sender.build_send("all", ["wom"] + rest)
+        for value in ("", "-1", "+1", "1.5", "1m", "35792", "65534", "65535", "９", "99999999999999999999"):
+            with self.assertRaises(ValueError):
+                sender.build_send("0", ["wom", "timeout", value])
+
+    def test_decode_and_wait_all_results(self):
+        result = bytes([1, 3, 10, 0, 0, 0, 9, 0, 0, 0, 0, 0])
+        error = bytes([1, 4, 0, 0, 110, 0, 9, 0, 0, 0, 0, 0])
+        summary = bytes([2, 9, 0, 8, 0, 0, 0, 16, 0, 0, 0, 0])
+        self.assertEqual(sender.decode_wom_result(result),
+                         {"tracker_id": 3, "minutes": 10, "error": 0, "token": 9})
+        self.assertEqual(sender.decode_wom_result(error)["error"], 110)
+        self.assertEqual(sender.decode_wom_result(summary),
+                         {"token": 9, "success_mask": 8, "failure_mask": 16})
+        client = object.__new__(sender.HidCmdClient)
+        client.acks = {}
+        client._write = lambda packet: None
+        replies = iter(((7, bytes(12)), (7, result), (7, error), (4, summary)))
+        client._wait_ack = lambda seq, opcode, timeout: next(replies)
+        self.assertEqual(client.command(0x28, b"\xff\0\0", wait_completion=True),
+                         (4, summary))
+
+    def test_clear_result_rendering(self):
+        result = bytes([1, 3, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0])
+        error = bytes([1, 3, 0, 0, 5, 0, 9, 0, 0, 0, 0, 0])
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            sender.print_wom_result(result)
+        self.assertIn("restored firmware default", captured.getvalue())
+        self.assertNotIn("0 minutes", captured.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            sender.print_wom_result(error)
+        self.assertIn("error 5", captured.getvalue())
+        self.assertNotIn("restored", captured.getvalue())
+
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
@@ -78,5 +125,30 @@ if __name__ == "__main__":
             "-fno-pie", "-no-pie", "-I", str(temporary), "-I", str(ROOT / "src"),
             str(ROOT / "src/console_send.c"), str(HERE / "test_console_send.c"),
             "-o", str(binary),
+        ], check=True)
+        subprocess.run([str(binary)], check=True)
+        extract_spec = importlib.util.spec_from_file_location("extract", HERE.parent / "tdma_loss/run.py")
+        extract = importlib.util.module_from_spec(extract_spec)
+        extract_spec.loader.exec_module(extract)
+        source = (ROOT / "src/rcv_cmd.c").read_text()
+        production = "\n".join(extract.function(source, name) for name in (
+            "fill_ack", "remote_hid_abort", "remote_hid_begin", "remote_wom_result",
+            "remote_wom_poll", "remote_wom_begin", "rcv_cmd_remote_wom_command",
+            "on_remote_confirm"))
+        start = source.index("if (opcode == ESB_PONG_FLAG_WOM_CONTROL)")
+        end = source.index("} else if (opcode == ESB_PONG_FLAG_SENS_SET)", start)
+        production += ("\nstatic uint8_t hid_wom(const uint8_t *buf, size_t args_len) {\n"
+                       "uint8_t seq=buf[1], opcode=buf[2], target=buf[4], status;\n"
+                       "const uint8_t *args = &buf[4];\n" + source[start:end] +
+                       "} else { assert(false); } return status; }\n")
+        prelude, cases = (HERE / "test_wom_completion.c").read_text().split("/* PRODUCTION BODIES */")
+        generated = temporary / "wom.c"
+        generated.write_text(prelude + production + cases)
+        binary = temporary / "wom"
+        subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
+            "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
+            "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+            "-fno-pie", "-no-pie", "-I", str(temporary), "-I", str(ROOT / "src"),
+            str(generated), "-o", str(binary),
         ], check=True)
         subprocess.run([str(binary)], check=True)

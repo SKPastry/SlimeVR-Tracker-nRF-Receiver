@@ -81,6 +81,19 @@
 
 #define RCV_HID_CMD_LEN 16
 
+/* WOM request: target [4], LE16 operation [5:7] (0=query, 1..35791=minutes,
+ * ESB_WOM_TIMEOUT_CLEAR=clear saved override and restore exact firmware default).
+ * ACK result: STARTED, kind [4]=1, id [5], LE16 value [6:8],
+ * LE16 errno [8:10], LE16 receiver token [10:12].
+ * Value=0 with errno=0 confirms clear. Otherwise value is timeout minutes;
+ * nonzero errno is failure.
+ * ACK summary: OK/ENOENT, kind [4]=2, LE16 token [5:7],
+ * LE32 success mask [7:11], LE32 failure mask [11:15].
+ * Unused bytes are zero. All targets uses the active-tracker scan.
+ */
+#define RCV_HID_WOM_RESULT 1
+#define RCV_HID_WOM_SUMMARY 2
+
 static inline bool rcv_hid_opcode_is_tracker(uint8_t op)
 {
 	return op >= RCV_HID_OP_TRACKER_MIN && op <= RCV_HID_OP_TRACKER_MAX;
@@ -139,6 +152,7 @@ static inline bool rcv_hid_opcode_is_pong_flag(uint8_t op)
 	case ESB_PONG_FLAG_MAG_AUTO_ON:
 	case ESB_PONG_FLAG_MAG_AUTO_OFF:
 	case ESB_PONG_FLAG_TCAL_HEATED_START:
+	case ESB_PONG_FLAG_WOM_CONTROL:
 	case ESB_PONG_FLAG_OTA_QUERY_INFO:
 	case ESB_PONG_FLAG_OTA_ABORT:
 	case ESB_PONG_FLAG_OTA_SUPPRESS:

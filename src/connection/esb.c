@@ -211,6 +211,14 @@ static volatile uint8_t metadata_pending_mask[MAX_TRACKERS];
 static volatile uint8_t metadata_pending_chunk[MAX_TRACKERS];
 static volatile uint16_t metadata_pending_token[MAX_TRACKERS];
 static uint16_t metadata_next_token;
+/* Tokens survive slot cleanup so late replies cannot confirm a replacement. */
+static uint16_t wom_next_token;
+static uint16_t wom_token[MAX_TRACKERS];
+static uint16_t wom_minutes[MAX_TRACKERS];
+static uint16_t wom_error[MAX_TRACKERS];
+static bool wom_complete[MAX_TRACKERS];
+static bool wom_advertised[MAX_TRACKERS];
+static uint8_t wom_first_ping_counter[MAX_TRACKERS];
 /* Sticky state for commands addressed to "all": newly active trackers must
  * converge to the same test on/off state. Confirmed means the tracker has
  * executed and acknowledged the current desired state. */
@@ -1312,6 +1320,33 @@ K_THREAD_DEFINE(esb_thread_id, 2048, esb_thread, NULL, NULL, NULL, ESB_THREAD_PR
 
 static bool esb_parse_pair(const uint8_t packet[8]);
 static void process_pairing_queue(void);
+/* Only result/error flags prove execution; legacy request echoes never do. */
+static void remote_wom_receive(uint8_t id, uint8_t flag, const uint8_t data[4], uint8_t counter)
+{
+	if (flag != ESB_PING_FLAG_WOM_RESULT && flag != ESB_PING_FLAG_WOM_ERROR) {
+		return;
+	}
+	uint16_t value = ((uint16_t)data[0] << 8) | data[1];
+	uint16_t token = ((uint16_t)data[2] << 8) | data[3];
+	unsigned int key = irq_lock();
+	if (tracker_remote_command[id] == ESB_PONG_FLAG_WOM_CONTROL &&
+	    token != 0 && token == wom_token[id] && !wom_complete[id] &&
+	    wom_advertised[id] && counter != wom_first_ping_counter[id]) {
+		bool success = flag == ESB_PING_FLAG_WOM_RESULT &&
+			(wom_minutes[id] == ESB_WOM_TIMEOUT_CLEAR ? value == 0 :
+			 (value >= 1 && value <= ESB_WOM_TIMEOUT_MAX_MINUTES &&
+			  (wom_minutes[id] == 0 || wom_minutes[id] == value)));
+		bool failure = flag == ESB_PING_FLAG_WOM_ERROR && value != 0;
+		if (success || failure) {
+			wom_minutes[id] = success ? value : 0;
+			wom_error[id] = failure ? value : 0;
+			wom_complete[id] = true;
+			tracker_remote_command[id] = ESB_PONG_FLAG_NORMAL;
+		}
+	}
+	irq_unlock(key);
+}
+
 static const char *esb_pong_flag_name(uint8_t flag);
 
 /* ISR-safe roster snapshot; mutations publish address/count under irq_lock. */
@@ -1865,6 +1900,13 @@ static void esb_ack_handler_cb(
 			if (ota_aborting) {
 				cmd = ESB_PONG_FLAG_OTA_ABORT;
 			}
+			/* Drain a previous tracker outcome before issuing a new WOM
+			 * transaction. In particular, receiver reboot must not reuse a
+			 * token against a still-cached success or error on the tracker. */
+			if (cmd == ESB_PONG_FLAG_WOM_CONTROL && !wom_advertised[tracker_id] &&
+			    (pdu_data[7] & 0x7f) != ESB_PONG_FLAG_NORMAL) {
+				cmd = ESB_PONG_FLAG_NORMAL;
+			}
 		}
 		/* Save accurate RADIO ISR timestamp for clock_bias computation in event_handler. */
 		g_ping_isr_rx_ticks[tracker_id] = rx_ticks;
@@ -1915,6 +1957,11 @@ static void esb_ack_handler_cb(
 				ack_payload->data[9] = (ch >> 16) & 0xFF;
 				ack_payload->data[10] = (ch >> 8) & 0xFF;
 				ack_payload->data[11] = (ch) & 0xFF;
+			} else if (cmd == ESB_PONG_FLAG_WOM_CONTROL) {
+				ack_payload->data[8] = wom_minutes[tracker_id] >> 8;
+				ack_payload->data[9] = wom_minutes[tracker_id] & 0xff;
+				ack_payload->data[10] = wom_token[tracker_id] >> 8;
+				ack_payload->data[11] = wom_token[tracker_id] & 0xff;
 			} else if (cmd == ESB_PONG_FLAG_TEST_MODE_ON) {
 				ack_payload->data[8] = (tracker_test_on_tps[tracker_id] >> 8) & 0xFF;
 				ack_payload->data[9] = tracker_test_on_tps[tracker_id] & 0xFF;
@@ -1968,6 +2015,19 @@ static void esb_ack_handler_cb(
 			if (ota_has_ack) {
 				*has_ack_payload = true;
 			}
+		}
+		/* Arm only the final selected request, never a PONG replaced by OTA.
+		 * The incoming PING predates this ACK and cannot confirm it. */
+		if (*has_ack_payload && ack_payload->length == ESB_PONG_LEN &&
+		    ack_payload->data[0] == ESB_PONG_TYPE &&
+		    ack_payload->data[7] == ESB_PONG_FLAG_WOM_CONTROL &&
+		    tracker_remote_command[tracker_id] == ESB_PONG_FLAG_WOM_CONTROL &&
+		    wom_token[tracker_id] != 0 &&
+		    (((uint16_t)ack_payload->data[8] << 8) | ack_payload->data[9]) == wom_minutes[tracker_id] &&
+		    (((uint16_t)ack_payload->data[10] << 8) | ack_payload->data[11]) == wom_token[tracker_id] &&
+		    !wom_advertised[tracker_id]) {
+			wom_first_ping_counter[tracker_id] = counter;
+			wom_advertised[tracker_id] = true;
 		}
 		return;
 	}
@@ -2494,6 +2554,7 @@ void event_handler(struct esb_evt const *event)
 						}
 					} // End of else branch for ping_counter_initialized
 
+					remote_wom_receive(tracker_id, ping_ack_flag, &rx_payload.data[8], counter);
 					if (ping_ack_flag == ESB_PONG_FLAG_METADATA_REQUEST) {
 						uint16_t echoed_token = ((uint16_t)rx_payload.data[10] << 8) | rx_payload.data[11];
 						bool metadata_matches = metadata_active_mask[tracker_id] != 0 &&
@@ -2505,7 +2566,10 @@ void event_handler(struct esb_evt const *event)
 							LOG_DBG("Tracker %u confirmed metadata token=%u", tracker_id, echoed_token);
 						}
 					}
-					if (ping_ack_flag != ESB_PONG_FLAG_NORMAL) {
+					if (ping_ack_flag != ESB_PONG_FLAG_NORMAL &&
+					    ping_ack_flag != ESB_PONG_FLAG_WOM_CONTROL &&
+					    ping_ack_flag != ESB_PING_FLAG_WOM_RESULT &&
+					    ping_ack_flag != ESB_PING_FLAG_WOM_ERROR) {
 						uint16_t ping_ack_tps = ping_ack_flag == ESB_PONG_FLAG_TEST_MODE_ON
 							? ((uint16_t)rx_payload.data[8] << 8) | rx_payload.data[9] : 0;
 						bool test_payload_matches = ping_ack_flag != ESB_PONG_FLAG_TEST_MODE_ON
@@ -3058,6 +3122,12 @@ static void tracker_slot_reset(uint8_t id)
 	last_raw_seq[id] = 0;
 	last_raw_valid[id] = false;
 	tracker_remote_command[id] = ESB_PONG_FLAG_NORMAL;
+	wom_token[id] = 0;
+	wom_minutes[id] = 0;
+	wom_error[id] = 0;
+	wom_complete[id] = false;
+	wom_advertised[id] = false;
+	wom_first_ping_counter[id] = 0;
 	pending_cmd_arg[id] = 0;
 	tracker_test_on_tps[id] = 0;
 	for (unsigned int axis = 0; axis < 3; axis++) {
@@ -3370,6 +3440,94 @@ int esb_clear(void)
 	return 0;
 }
 
+uint32_t esb_send_remote_wom_command(uint8_t target_id, uint16_t minutes, uint16_t *token_out)
+{
+	if (token_out == NULL ||
+	    (minutes > ESB_WOM_TIMEOUT_MAX_MINUTES &&
+	     minutes != ESB_WOM_TIMEOUT_CLEAR) ||
+	    (target_id != 0xff && target_id >= MAX_TRACKERS)) {
+		return 0;
+	}
+	*token_out = 0;
+	uint64_t scan_start_time = (uint64_t)k_uptime_get();
+	if (target_id == 0xff) {
+		k_msleep(REMOTE_COMMAND_ACTIVE_SCAN_MS);
+	}
+	k_mutex_lock(&tracker_store_lock, K_FOREVER);
+	unsigned int key = irq_lock();
+	uint32_t mask = 0;
+	for (uint8_t id = 0; id < stored_trackers && id < MAX_TRACKERS; id++) {
+		if (stored_tracker_addr[id] != 0 &&
+		    (target_id == id || (target_id == 0xff &&
+		     tracker_stats[id].last_packet_time >= scan_start_time))) {
+			mask |= BIT(id);
+		}
+	}
+	if (mask != 0) {
+		if (++wom_next_token == 0) {
+			wom_next_token = 1;
+		}
+		for (uint8_t id = 0; id < MAX_TRACKERS; id++) {
+			if (!(mask & BIT(id))) {
+				continue;
+			}
+			wom_token[id] = wom_next_token;
+			wom_minutes[id] = minutes;
+			wom_error[id] = 0;
+			wom_complete[id] = false;
+			wom_advertised[id] = false;
+			wom_first_ping_counter[id] = 0;
+			tracker_remote_command[id] = ESB_PONG_FLAG_WOM_CONTROL;
+		}
+		*token_out = wom_next_token;
+	}
+	irq_unlock(key);
+	k_mutex_unlock(&tracker_store_lock);
+	return mask;
+}
+
+bool esb_get_remote_wom_result(uint8_t id, uint16_t token, uint16_t *minutes, uint16_t *error)
+{
+	if (id >= MAX_TRACKERS || token == 0 || minutes == NULL || error == NULL) {
+		return false;
+	}
+	unsigned int key = irq_lock();
+	bool matches = wom_token[id] == token;
+	/* Another control command displaced the pending request: never treat its
+	 * eventual generic confirmation as proof of a completed WOM command. */
+	if (matches && !wom_complete[id] && tracker_remote_command[id] != ESB_PONG_FLAG_WOM_CONTROL) {
+		wom_minutes[id] = 0;
+		wom_error[id] = ECANCELED;
+		wom_complete[id] = true;
+	}
+	bool complete = matches && wom_complete[id];
+	if (complete) {
+		*minutes = wom_minutes[id];
+		*error = wom_error[id];
+	}
+	irq_unlock(key);
+	return complete;
+}
+
+void esb_cancel_remote_wom_command(uint32_t mask, uint16_t token)
+{
+	unsigned int key = irq_lock();
+	for (uint8_t id = 0; id < MAX_TRACKERS; id++) {
+		if ((mask & BIT(id)) && token != 0 && wom_token[id] == token) {
+			if (tracker_remote_command[id] == ESB_PONG_FLAG_WOM_CONTROL) {
+				tracker_remote_command[id] = ESB_PONG_FLAG_NORMAL;
+			}
+			wom_token[id] = 0;
+			wom_minutes[id] = 0;
+			wom_error[id] = 0;
+			wom_complete[id] = false;
+			wom_advertised[id] = false;
+			wom_first_ping_counter[id] = 0;
+		}
+	}
+	irq_unlock(key);
+}
+
 void esb_send_remote_command_sens(uint8_t tracker_id, float x, float y, float z)
 {
 	if (tracker_id >= MAX_TRACKERS) {
@@ -3628,6 +3786,8 @@ static const char *esb_pong_flag_name(uint8_t flag)
 	switch (flag) {
 	case ESB_PONG_FLAG_NORMAL:
 		return "NORMAL";
+	case ESB_PONG_FLAG_WOM_CONTROL:
+		return "WOM_CONTROL";
 	case ESB_PONG_FLAG_SHUTDOWN:
 		return "SHUTDOWN";
 	case ESB_PONG_FLAG_CALIBRATE:
@@ -3770,7 +3930,10 @@ void esb_send_remote_command(uint8_t tracker_id, uint8_t command_flag)
 
 void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8_t arg)
 {
-	if (command_flag == ESB_PONG_FLAG_SET_CHANNEL || command_flag == ESB_PONG_FLAG_CLEAR_CHANNEL) {
+	if (command_flag == ESB_PONG_FLAG_SET_CHANNEL || command_flag == ESB_PONG_FLAG_CLEAR_CHANNEL ||
+	    command_flag == ESB_PONG_FLAG_WOM_CONTROL ||
+	    command_flag == ESB_PING_FLAG_WOM_RESULT ||
+	    command_flag == ESB_PING_FLAG_WOM_ERROR) {
 		return;
 	}
 	if (tracker_id < MAX_TRACKERS) {
@@ -3795,7 +3958,10 @@ void esb_send_remote_command_arg(uint8_t tracker_id, uint8_t command_flag, uint8
 // Send remote command to all paired trackers
 uint32_t esb_send_remote_command_all(uint8_t command_flag)
 {
-	if (command_flag == ESB_PONG_FLAG_SET_CHANNEL || command_flag == ESB_PONG_FLAG_CLEAR_CHANNEL) {
+	if (command_flag == ESB_PONG_FLAG_SET_CHANNEL || command_flag == ESB_PONG_FLAG_CLEAR_CHANNEL ||
+	    command_flag == ESB_PONG_FLAG_WOM_CONTROL ||
+	    command_flag == ESB_PING_FLAG_WOM_RESULT ||
+	    command_flag == ESB_PING_FLAG_WOM_ERROR) {
 		return 0;
 	}
 	int64_t scan_start_time = k_uptime_get();

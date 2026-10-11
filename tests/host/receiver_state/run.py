@@ -36,6 +36,8 @@ last_raw_valid tracker_remote_command pending_cmd_arg tracker_test_on_tps
 pending_sens_data pending_sens_auto_axis pending_sens_auto_revolutions
 metadata_active_mask metadata_active_chunk metadata_active_token
 metadata_pending_mask metadata_pending_chunk metadata_pending_token
+wom_token wom_minutes wom_error wom_complete
+wom_advertised wom_first_ping_counter
 pipe_mismatch_count crc_error_count
  test_all_ready_after_ms tdma_config_packed tdma_prev_recv tdma_prev_gaps
 tdma_prev_restarts tracker_stats decision_received decision_gaps g_tdma_stats
@@ -67,7 +69,9 @@ def function(name):
 constants = '\n'.join(re.findall(
     r'^#define (?:PING_TIMEOUT_MS|REMOTE_COMMAND_ACTIVE_SCAN_MS|TDMA_SHADOW_\w+|RX_PHASE_BUCKETS|RX_RSSI_BUCKETS)\b[^\n]*', live, re.M))
 protocol = (ROOT / 'src/connection/esb.h').read_text()
-constants += '\n' + '\n'.join(re.findall(r'^#define ESB_PONG_FLAG_\w+[^\n]*', protocol, re.M))
+constants += '\n' + '\n'.join(re.findall(
+    r'^#define ESB_(?:PONG_FLAG_\w+|PING_FLAG_WOM_(?:RESULT|ERROR))\b[^\n]*',
+    protocol, re.M))
 declarations = constants + '\n' + '\n'.join(
     extract_block(live, rf'^{kind} {name}\s*\{{', semicolon=True)
     for kind, name in [('struct', 'packet_stats'), ('struct', 'tdma_stats'), ('enum', 'tdma_shadow_evidence')])

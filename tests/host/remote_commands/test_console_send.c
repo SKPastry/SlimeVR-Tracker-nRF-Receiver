@@ -19,6 +19,38 @@ uint8_t rcv_cmd_remote_sens_set(uint8_t target, float x, float y, float z) { ass
 uint8_t rcv_cmd_remote_sens_auto(uint8_t target, uint8_t axis, uint16_t rev) { assert(false); return 0; }
 uint8_t rcv_cmd_remote_test_on(uint8_t target, uint16_t tps) { assert(false); return 0; }
 uint8_t rcv_cmd_remote_test_off(uint8_t target) { assert(false); return 0; }
+static uint16_t last_minutes;
+uint8_t rcv_cmd_remote_wom_command(uint8_t target, uint16_t minutes)
+{
+    requests++;
+    last_target = target;
+    last_minutes = minutes;
+    return RCV_HID_ST_STARTED;
+}
+
+static void test_wom_commands(void)
+{
+    char *targets[] = {"0", "all"};
+    char *invalid[] = {"", "-1", "+1", "1.5", "1m", "35792", "65534", "65535", "99999999999999999999"};
+    for (unsigned i = 0; i < 2; i++) {
+        requests = 0;
+        console_handle_send(targets[i], "wom", "timeout", NULL, NULL);
+        assert(requests == 1 && last_minutes == 0 && last_target == (i ? 255 : 0));
+        console_handle_send(targets[i], "wom", "timeout", "1", NULL);
+        assert(requests == 2 && last_minutes == 1);
+        console_handle_send(targets[i], "wom", "timeout", "35791", NULL);
+        assert(requests == 3 && last_minutes == 35791);
+        console_handle_send(targets[i], "wom", "timeout", "0", NULL);
+        assert(requests == 4 && last_minutes == ESB_WOM_TIMEOUT_CLEAR);
+        for (unsigned j = 0; j < sizeof(invalid) / sizeof(invalid[0]); j++) {
+            console_handle_send(targets[i], "wom", "timeout", invalid[j], NULL);
+        }
+        console_handle_send(targets[i], "wom", NULL, NULL, NULL);
+        console_handle_send(targets[i], "wom", "off", NULL, NULL);
+        console_handle_send(targets[i], "wom", "timeout", "1", "extra");
+        assert(requests == 4);
+    }
+}
 
 static void test_calibration_commands(void)
 {
@@ -45,6 +77,7 @@ static void test_calibration_commands(void)
 int main(void)
 {
     test_calibration_commands();
+    test_wom_commands();
     char *targets[] = {"0", "all"};
     for (unsigned i = 0; i < 2; i++) {
         requests = 0;

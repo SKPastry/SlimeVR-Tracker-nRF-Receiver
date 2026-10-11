@@ -24,6 +24,8 @@ functions = [
     "esb_set_all_trackers_channel", "esb_clear_all_trackers_channel",
     "esb_auto_channel_request", "esb_set_receiver_channel", "esb_clear_receiver_channel",
     "esb_get_receiver_channel",
+    "remote_wom_receive", "esb_send_remote_wom_command",
+    "esb_get_remote_wom_result", "esb_cancel_remote_wom_command",
 ]
 start = source.index("/* Migration owns an ACK overlay")
 end = source.index("bool esb_channel_is_busy", start)
@@ -51,12 +53,12 @@ prelude, cases = fixture.split("/* PRODUCTION BODIES */")
 # confirmation priority, command formats, OTA override and CRC generation.
 defines = []
 for line in header.splitlines():
-    match = re.match(r"#define (ESB_(?:PING|PONG|RAW|OTA|CHANNEL_CONFIRM)_\w+)\s+", line)
+    match = re.match(r"#define (ESB_(?:PING|PONG|RAW|OTA|CHANNEL_CONFIRM|WOM_TIMEOUT)_\w+)\s+", line)
     if match and not re.search(r"#define\s+" + match[1] + r"\b", prelude):
         defines.append(line)
 prelude = "\n".join(defines) + "\n" + prelude
 production += "\n" + extract.function(source, "esb_ack_handler_cb")
-start = source.index("if (ping_ack_flag != ESB_PONG_FLAG_NORMAL)")
+start = source.index("if (ping_ack_flag != ESB_PONG_FLAG_NORMAL")
 production += "\nstatic void echo(uint8_t tracker_id, uint8_t ping_ack_flag) {\n"
 production += "struct payload rx_payload = {0};\n"
 production += "rx_payload.data[7] = ping_ack_flag;\n"

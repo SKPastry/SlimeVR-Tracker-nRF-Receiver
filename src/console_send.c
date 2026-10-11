@@ -60,7 +60,7 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 		printk("  send all dfu         - Enter DFU mode on all active trackers\n");
 		printk(
 			"Available commands: shutdown, calibrate [acc], meow, scan, mag, reboot, clear, dfu, sens, "
-			"reset, ping, tcal, tdma, test\n"
+			"reset, ping, tcal, tdma, test, wom timeout [minutes]\n"
 		);
 		return;
 	}
@@ -77,6 +77,42 @@ void console_handle_send(char *arg, char *arg2, char *arg3, char *arg4, char *ar
 			return;
 		}
 		tracker_id = (uint8_t)id;
+	}
+
+	if (strcmp(arg2, "wom") == 0) {
+		if (!arg3 || strcmp(arg3, "timeout") != 0 || arg5) {
+			printk("Usage: send <id|all> wom timeout [minutes: 0-35791; 0 restores firmware default]\n");
+			return;
+		}
+		uint32_t minutes = 0;
+		if (arg4) {
+			if (!*arg4) {
+				printk("Minutes must be an integer from 0 to 35791 (0 restores firmware default)\n");
+				return;
+			}
+			for (const char *p = arg4; *p; p++) {
+				if (*p < '0' || *p > '9' || minutes > 35791) {
+					printk("Minutes must be an integer from 0 to 35791 (0 restores firmware default)\n");
+					return;
+				}
+				minutes = minutes * 10 + (uint32_t)(*p - '0');
+			}
+			if (minutes > 35791) {
+				printk("Minutes must be an integer from 0 to 35791 (0 restores firmware default)\n");
+				return;
+			}
+			if (minutes == 0) {
+				minutes = ESB_WOM_TIMEOUT_CLEAR;
+			}
+		}
+		uint8_t st = rcv_cmd_remote_wom_command(
+			target_all ? RCV_HID_TARGET_ALL : tracker_id, (uint16_t)minutes);
+		if (st == RCV_HID_ST_STARTED) {
+			printk("WOM command queued; waiting for tracker results\n");
+		} else {
+			printk("WOM command request failed: status %u\n", st);
+		}
+		return;
 	}
 
 	uint8_t cmd_flag = 0xFF;

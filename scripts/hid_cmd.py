@@ -19,6 +19,7 @@ Examples:
   hid_cmd.py send all reset zro
   hid_cmd.py send all tcal auto on
   hid_cmd.py send 0 tcal heat start
+  hid_cmd.py send 0 wom timeout
   hid_cmd.py tracker-channel 25
   hid_cmd.py --gui
 
@@ -218,6 +219,7 @@ PONG_FLAG = {
     "mag-auto-on": 0x25,
     "mag-auto-off": 0x26,
     "tcal-heat-start": 0x27,
+    "wom": 0x28,
     "ota-query-info": 0x30,
     "ota-abort": 0x31,
     "ota-suppress": 0x32,
@@ -415,7 +417,15 @@ class HidCmdClient:
         if wait_completion and status == RCV_HID_ST_STARTED:
             print_status(status, payload)
             print("waiting for completion ACK…")
-            status, payload = self._wait_ack(seq, opcode, completion_timeout_s)
+            deadline = time.monotonic() + completion_timeout_s
+            while status == RCV_HID_ST_STARTED:
+                if opcode == 0x28 and payload and payload[0] == 1:
+                    print_wom_result(payload)
+                status, payload = self._wait_ack(seq, opcode, max(0.0, deadline - time.monotonic()))
+                if opcode != 0x28:
+                    break
+            if opcode == 0x28 and payload and payload[0] == 2:
+                print_wom_result(payload)
         return status, payload
 
 
@@ -423,6 +433,39 @@ def print_status(status: int, payload: bytes = b"") -> None:
     name = STATUS_NAMES.get(status, f"UNKNOWN({status})")
     extra = f" payload={payload[:8].hex()}" if any(payload) else ""
     print(f"ACK status={status} ({name}){extra}")
+
+ESB_WOM_TIMEOUT_CLEAR = 0xFFFF
+
+
+def decode_wom_result(payload: bytes) -> dict | None:
+    """Decode opcode 0x28 ACK data (the 12 bytes after the ACK header)."""
+    if len(payload) != 12:
+        return None
+    if payload[0] == 1:
+        return {"tracker_id": payload[1], "minutes": int.from_bytes(payload[2:4], "little"),
+                "error": int.from_bytes(payload[4:6], "little"),
+                "token": int.from_bytes(payload[6:8], "little")}
+    if payload[0] == 2:
+        return {"token": int.from_bytes(payload[1:3], "little"),
+                "success_mask": int.from_bytes(payload[3:7], "little"),
+                "failure_mask": int.from_bytes(payload[7:11], "little")}
+    return None
+
+
+def print_wom_result(payload: bytes) -> None:
+    result = decode_wom_result(payload)
+    if result is None:
+        return
+    if "tracker_id" in result and result["error"]:
+        print(f"Tracker {result['tracker_id']} WOM command: error {result['error']} (firmware errno)")
+        return
+    if "tracker_id" in result:
+        outcome = ("restored firmware default" if result["minutes"] == 0 else
+                   f"{result['minutes']} minutes")
+        print(f"Tracker {result['tracker_id']} WOM normal timeout: {outcome}")
+    else:
+        print(f"WOM complete: success mask 0x{result['success_mask']:08X}, "
+              f"failure mask 0x{result['failure_mask']:08X}")
 
 
 def build_send(target: str, tokens: list[str]) -> tuple[int, bytes]:
@@ -433,6 +476,20 @@ def build_send(target: str, tokens: list[str]) -> tuple[int, bytes]:
     tid = parse_target(target)
     cmd = tokens[0]
     rest = tokens[1:]
+
+    if cmd == "wom":
+        if len(rest) not in (1, 2) or rest[0] != "timeout":
+            raise ValueError("Usage: send <id|all> wom timeout [minutes: 0-35791; 0 restores firmware default]")
+        minutes = 0
+        if len(rest) == 2:
+            if not rest[1].isascii() or not rest[1].isdecimal():
+                raise ValueError("minutes must be an integer from 0 to 35791 (0 restores firmware default)")
+            minutes = int(rest[1])
+            if not 0 <= minutes <= 35791:
+                raise ValueError("minutes must be an integer from 0 to 35791 (0 restores firmware default)")
+            if minutes == 0:
+                minutes = ESB_WOM_TIMEOUT_CLEAR
+        return 0x28, bytes([tid]) + struct.pack("<H", minutes)
 
     if cmd == "calibrate":
         if not rest:
@@ -982,6 +1039,8 @@ def main() -> int:
             "  send all tcal auto on\n"
             "  send all tdma on\n"
             "  send all test off\n"
+            "  send 0 wom timeout  # query normal timeout minutes\n"
+            "  send all wom timeout 0  # restore firmware default\n"
             "  send all dfu ota\n"
             "  send all channel 25\n"
             "  send 0 raw 0x04\n"
